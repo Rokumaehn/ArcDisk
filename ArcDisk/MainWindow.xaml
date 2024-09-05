@@ -46,6 +46,8 @@
             <StackPanel Orientation="Horizontal">
                 <Button x:Name="btnRead" Content="Read" Click="btnRead_Click" Padding="5" Margin="10,10,10,10" />
                 <Button x:Name="btnWrite" Content="Write" Click="btnWrite_Click" Padding="5" Margin="10,10,10,10" />
+                <CheckBox x:Name="chkAllocd" Content="Read only allocated" Margin="10,10,10,10" />
+                <Button x:Name="btnQuery" Content="Query" Click="btnQuery_Click" Padding="5" Margin="10,10,10,10" />
                 <TextBlock x:Name="txtProgress" Margin="10,10,10,10" Text="" />
             </StackPanel>
         </StackPanel>

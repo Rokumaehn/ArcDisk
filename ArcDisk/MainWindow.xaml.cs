@@ -11,9 +11,9 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Navigation;
-using ICSharpCode.SharpZipLib.Zip;
 using Microsoft.Management.Infrastructure;
 using Microsoft.Win32;
+using RawDiskLib;
 
 namespace ArcDisk;
 
@@ -122,6 +122,26 @@ public partial class MainWindow : Window
     }
 
 
+    public Task<long> CopyBytesAsync(long bytesRequired, Stream inStream, Stream outStream)
+    {
+        return Task.Run<long>(() =>
+        {
+            long readSoFar = 0L;
+            var buffer = new byte[64*1024];
+            do
+            {
+                var toRead = Math.Min(bytesRequired - readSoFar, buffer.Length);
+                var readNow = inStream.Read(buffer, 0, (int)toRead);
+                if (readNow == 0)
+                    break; // End of stream
+                outStream.Write(buffer, 0, readNow);
+                readSoFar += readNow;
+            } while (readSoFar < bytesRequired);
+            return readSoFar;
+        });
+    }
+
+
     private void btnRead_Click(object sender, RoutedEventArgs e)
     {
         if(CurrentOperation != ImagingOperations.None)
@@ -146,6 +166,10 @@ public partial class MainWindow : Window
 
             CurrentDisk = new RawDiskLib.RawDisk(RawDiskLib.DiskNumberType.PhysicalDisk, physicalIndex, System.IO.FileAccess.Read);
             CurrentDiskStream = CurrentDisk.CreateDiskStream();
+            if(chkAllocd.IsChecked == true)
+            {
+                CurrentSizeToRead = GetAllocatedSize(CurrentDisk);
+            }
             btnRead.IsEnabled = false;
             btnWrite.IsEnabled = false;
 
@@ -155,7 +179,7 @@ public partial class MainWindow : Window
             CurrentArchive = new ZipArchive(CurrentArchiveStream, ZipArchiveMode.Create, true);
             CurrentArchiveEntry = CurrentArchive.CreateEntry(imgFileName, CompressionLevel.SmallestSize);
             CurrentArchiveEntryStream = CurrentArchiveEntry.Open();
-            IoTask = CurrentDiskStream.CopyToAsync(CurrentArchiveEntryStream);
+            IoTask = CopyBytesAsync(CurrentSizeToRead, CurrentDiskStream, CurrentArchiveEntryStream);
 
             CurrentOperation = ImagingOperations.Read;
 
@@ -214,6 +238,122 @@ public partial class MainWindow : Window
             //     });
             // });
         }
+    }
+
+    class PartitionInfo
+    {
+        public string Name { get; set; }
+        public string Type { get; set; }
+        public uint FirstCylinder { get; set; }
+        public uint FirstHead { get; set; }
+        public uint FirstSector { get; set; }
+        public uint LastCylinder { get; set; }
+        public uint LastHead { get; set; }
+        public uint LastSector { get; set; }
+        public long Size { get; set; }
+        public long Offset { get; set; }
+    }
+
+    public long GetAllocatedSize(RawDisk disk)
+    {
+        var mbr = CurrentDisk.ReadSectors(0, 1);
+        var parts = new List<PartitionInfo>();
+        for(int i=0; i < 4; i++)
+        {
+            var offset = 446 + i * 16;
+            var type = mbr[offset + 4];
+            if(type == 0)
+            {
+                continue;
+            }
+
+            var chsFirst = BitConverter.ToUInt32(mbr, offset + 1);
+            var chsLast = BitConverter.ToUInt32(mbr, offset + 5);
+
+            var partition = new PartitionInfo
+            {
+                Name = $"Partition {i}",
+                Type = type.ToString(),
+                FirstCylinder = (chsFirst & 0x00FF00 << 2) | (chsFirst >> 16) & 0xFF,
+                FirstHead = (chsFirst) & 0xFF,
+                FirstSector = (chsFirst >> 8) & 0x3F,
+                LastCylinder = (chsLast & 0x00FF00 << 2) | (chsLast >> 16) & 0xFF,
+                LastHead = (chsLast) & 0xFF,
+                LastSector = (chsLast >> 8) & 0x3F,
+                Offset = BitConverter.ToUInt32(mbr, offset + 8),
+                Size = BitConverter.ToUInt32(mbr, offset + 12)
+            };
+
+            parts.Add(partition);
+        }
+
+        var max = parts.Max(p => p.Offset + p.Size);
+        return max * 512;
+    }
+
+    private void btnQuery_Click(object sender, RoutedEventArgs e)
+    {
+        if(CurrentOperation != ImagingOperations.None)
+        {
+            return;
+        }
+
+
+            var disk = lstDrives.SelectedItem as DiskListItem;
+            if (disk == null)
+            {
+                return;
+            }
+
+            CurrentSizeToRead = disk.Size;
+            var physicalIndex = disk.PhysicalIndex;
+
+            CurrentDisk = new RawDiskLib.RawDisk(RawDiskLib.DiskNumberType.PhysicalDisk, physicalIndex, System.IO.FileAccess.Read);
+            CurrentDiskStream = CurrentDisk.CreateDiskStream();
+            var mbr = CurrentDisk.ReadSectors(0, 1);
+            var parts = new List<PartitionInfo>();
+            for(int i=0; i < 4; i++)
+            {
+                var offset = 446 + i * 16;
+                var type = mbr[offset + 4];
+                if(type == 0)
+                {
+                    continue;
+                }
+
+                var chsFirst = BitConverter.ToUInt32(mbr, offset + 1);
+                var chsLast = BitConverter.ToUInt32(mbr, offset + 5);
+
+                var partition = new PartitionInfo
+                {
+                    Name = $"Partition {i}",
+                    Type = type.ToString(),
+                    FirstCylinder = (chsFirst & 0x00FF00 << 2) | (chsFirst >> 16) & 0xFF,
+                    FirstHead = (chsFirst) & 0xFF,
+                    FirstSector = (chsFirst >> 8) & 0x3F,
+                    LastCylinder = (chsLast & 0x00FF00 << 2) | (chsLast >> 16) & 0xFF,
+                    LastHead = (chsLast) & 0xFF,
+                    LastSector = (chsLast >> 8) & 0x3F,
+                    Offset = BitConverter.ToUInt32(mbr, offset + 8),
+                    Size = BitConverter.ToUInt32(mbr, offset + 12)
+                };
+                parts.Add(partition);
+
+                Console.WriteLine(partition);
+            }
+
+            var last = parts.Last();
+
+            var s1 = CurrentDisk.ReadSectors(last.Offset + last.Size - 1, 1);
+            var s2 = CurrentDisk.ReadSectors(last.Offset + last.Size, 1);
+            var s3 = CurrentDisk.ReadSectors(last.Offset + last.Size + 1, 1);
+
+            var allocSizeMB = ((last.Offset + last.Size) * 512) / 1024.0 / 1024.0;
+
+            CurrentDiskStream.Close();
+            CurrentDiskStream = null;
+            CurrentDisk = null;
+        
     }
 
     private void btnWrite_Click(object sender, RoutedEventArgs e)
