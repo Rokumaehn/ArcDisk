@@ -8,12 +8,14 @@ using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Documents;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Navigation;
 using Microsoft.Management.Infrastructure;
 using Microsoft.Win32;
 using RawDiskLib;
+using SevenZip;
 
 namespace ArcDisk;
 
@@ -30,14 +32,14 @@ public partial class MainWindow : Window
 
     private void ProgressTimerCallback(object? state)
     {
-        if(CurrentOperation == ImagingOperations.None || CurrentDiskStream == null || CurrentSizeToRead == 0)
+        if(CurrentOperation == ImagingOperations.None || CurrentSizeToRead == 0)
         {
             return;
         }
 
         seconds++;
 
-        var cur = CurrentDiskStream.Position;
+        var cur = BytesCopied;
 
         if(seconds % 10 == 0)
         {
@@ -65,6 +67,8 @@ public partial class MainWindow : Window
         var test = RawDiskLib.Utils.GetAvailableDrives();
 
         lstDrives.ItemsSource = Disks;
+        cmbFormat.ItemsSource = Enum.GetValues(typeof(ImagingFormats));
+        cmbFormat.SelectedItem = ImagingFormats.Zip;
 
         Init();
     }
@@ -113,6 +117,7 @@ public partial class MainWindow : Window
     public long CurrentSizeToRead { get; set; }
     public Task IoTask { get; set; }
     public ImagingOperations CurrentOperation { get; set; }
+    public ImagingFormats CurrentFormat => (ImagingFormats)cmbFormat.SelectedItem;
 
     public enum ImagingOperations
     {
@@ -121,12 +126,47 @@ public partial class MainWindow : Window
         Write
     }
 
+    public enum ImagingFormats
+    {
+        Zip,
+        Lzma
+    }
 
+    public class CompressionProgress : ICodeProgress
+    {
+        MainWindow Wnd;
+        public CompressionProgress( MainWindow wnd )
+        {
+            Wnd = wnd;
+        }
+
+        public void SetProgress(long inSize, long outSize)
+        {
+            Wnd.BytesCopied = inSize;
+        }
+    }
+
+    public class DecompressionProgress : ICodeProgress
+    {
+        MainWindow Wnd;
+        public DecompressionProgress( MainWindow wnd )
+        {
+            Wnd = wnd;
+        }
+
+        public void SetProgress(long inSize, long outSize)
+        {
+            Wnd.BytesCopied = outSize;
+        }
+    }
+
+    public long BytesCopied { get; set; }
     public Task<long> CopyBytesAsync(long bytesRequired, Stream inStream, Stream outStream)
     {
         return Task.Run<long>(() =>
         {
             long readSoFar = 0L;
+            BytesCopied = 0L;
             var buffer = new byte[64*1024];
             do
             {
@@ -136,19 +176,15 @@ public partial class MainWindow : Window
                     break; // End of stream
                 outStream.Write(buffer, 0, readNow);
                 readSoFar += readNow;
+                BytesCopied = readSoFar;
             } while (readSoFar < bytesRequired);
             return readSoFar;
         });
     }
 
 
-    private void btnRead_Click(object sender, RoutedEventArgs e)
+    protected void ReadZip()
     {
-        if(CurrentOperation != ImagingOperations.None)
-        {
-            return;
-        }
-
         SaveFileDialog saveFileDialog = new SaveFileDialog();
         saveFileDialog.Filter = "Compressed Image (*.img.zip)|*.img.zip";
         if (saveFileDialog.ShowDialog() == true)
@@ -172,10 +208,11 @@ public partial class MainWindow : Window
             }
             btnRead.IsEnabled = false;
             btnWrite.IsEnabled = false;
+            lastBytesRead = 0;
 
             // Option 1: Using dotntet ZipArchive
             
-            CurrentArchiveStream = new FileStream(path, FileMode.Create, FileAccess.ReadWrite);
+            CurrentArchiveStream = new FileStream(path, FileMode.Create, FileAccess.Write);
             CurrentArchive = new ZipArchive(CurrentArchiveStream, ZipArchiveMode.Create, true);
             CurrentArchiveEntry = CurrentArchive.CreateEntry(imgFileName, CompressionLevel.SmallestSize);
             CurrentArchiveEntryStream = CurrentArchiveEntry.Open();
@@ -185,23 +222,26 @@ public partial class MainWindow : Window
 
             IoTask.ContinueWith((t) =>
             {
-                CurrentArchiveEntryStream.Close();
-                CurrentArchiveStream.Close();
                 CurrentDiskStream.Close();
-
-                CurrentArchiveEntryStream = null;
-                CurrentArchiveEntry = null;
-                CurrentArchiveStream = null;
-                CurrentArchive = null;
                 CurrentDiskStream = null;
                 CurrentDisk = null;
+
+                CurrentArchiveEntryStream.Close();
+                CurrentArchiveEntryStream.Dispose();
+                CurrentArchiveEntryStream = null;
+                CurrentArchiveEntry = null;
+                CurrentArchive.Dispose();
+                CurrentArchive = null;
+                CurrentArchiveStream.Close();
+                CurrentArchiveStream.Dispose();
+                CurrentArchiveStream = null;
 
                 CurrentSizeToRead = 0;
                 CurrentOperation = ImagingOperations.None;
                 progIo.Dispatcher.Invoke(() =>
                 {
-                   btnRead.IsEnabled = true;
-                   btnWrite.IsEnabled = true;
+                    btnRead.IsEnabled = true;
+                    btnWrite.IsEnabled = true;
                     progIo.Value = 0;
                 });
             });
@@ -237,6 +277,152 @@ public partial class MainWindow : Window
             //         progIo.Value = 0;
             //     });
             // });
+        }
+    }
+
+    protected void ReadLzma()
+    {
+        SaveFileDialog saveFileDialog = new SaveFileDialog();
+        saveFileDialog.Filter = "Compressed Image (*.img.lzma)|*.img.lzma";
+        if (saveFileDialog.ShowDialog() == true)
+        {
+            var disk = lstDrives.SelectedItem as DiskListItem;
+            if (disk == null)
+            {
+                return;
+            }
+
+            var path = saveFileDialog.FileName;
+            var imgFileName = Path.GetFileNameWithoutExtension(path);
+            CurrentSizeToRead = disk.Size;
+            var physicalIndex = disk.PhysicalIndex;
+
+            CurrentDisk = new RawDiskLib.RawDisk(RawDiskLib.DiskNumberType.PhysicalDisk, physicalIndex, System.IO.FileAccess.Read);
+            CurrentDiskStream = CurrentDisk.CreateDiskStream();
+            if(chkAllocd.IsChecked == true)
+            {
+                CurrentSizeToRead = GetAllocatedSize(CurrentDisk);
+            }
+            btnRead.IsEnabled = false;
+            btnWrite.IsEnabled = false;
+            lastBytesRead = 0;
+
+            // LZMA part
+            
+            //CurrentSizeToRead = 1024 * 1024 * 100; // FOR TESTING
+            CurrentArchiveStream = new FileStream(path, FileMode.Create, FileAccess.Write);
+            IoTask = Task.Run(() => { LzmaStreamer.Compress(CurrentArchiveStream, new RawDiskStreamTruncatedRead(CurrentDiskStream, CurrentSizeToRead), CurrentSizeToRead, new CompressionProgress(this)); });
+
+            CurrentOperation = ImagingOperations.Read;
+
+            IoTask.ContinueWith((t) =>
+            {
+                CurrentDiskStream.Close();
+                CurrentDiskStream = null;
+                CurrentDisk = null;
+
+                CurrentArchiveStream.Close();
+                CurrentArchiveStream.Dispose();
+                CurrentArchiveStream = null;
+
+                CurrentSizeToRead = 0;
+                CurrentOperation = ImagingOperations.None;
+                progIo.Dispatcher.Invoke(() =>
+                {
+                    btnRead.IsEnabled = true;
+                    btnWrite.IsEnabled = true;
+                    progIo.Value = 0;
+                });
+            });
+
+        }
+    }
+
+    public class RawDiskStreamTruncatedRead : Stream
+    {
+        protected RawDiskStream DiskStream;
+        protected long MaxLen;
+
+        public RawDiskStreamTruncatedRead(RawDiskStream diskStream, long maxLen)
+        {
+            DiskStream = diskStream;
+            MaxLen = maxLen;
+        }
+
+        public override bool CanRead => DiskStream.CanRead;
+
+        public override bool CanSeek => DiskStream.CanSeek;
+
+        public override bool CanWrite => DiskStream.CanWrite;
+
+        public override long Length => MaxLen;
+
+        long _position = 0;
+        public override long Position { get => _position; set => DiskStream.Position = value; }
+
+        public override void Flush()
+        {
+            DiskStream.Flush();
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if(_position + count >= MaxLen)
+            {
+                count = (int)(MaxLen - _position);
+            }
+
+            if(count <= 0)
+            {
+                return 0;
+            }
+
+            var actual = DiskStream.Read(buffer, offset, count);
+            if(actual > count)
+            {
+                var diff = count - actual;
+                DiskStream.Seek(diff, SeekOrigin.Current);
+                _position += count;
+                return count;
+            }
+
+            _position += actual;
+            return actual;
+        }
+
+        public override long Seek(long offset, SeekOrigin origin)
+        {
+            return DiskStream.Seek(offset, origin);
+        }
+
+        public override void SetLength(long value)
+        {
+            DiskStream.SetLength(value);
+        }
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            DiskStream.Write(buffer, offset, count);
+        }
+    }
+
+    private void btnRead_Click(object sender, RoutedEventArgs e)
+    {
+        if(CurrentOperation != ImagingOperations.None)
+        {
+            return;
+        }
+
+        switch (CurrentFormat)
+        {
+            case ImagingFormats.Zip:
+                ReadZip();
+                break;
+            case ImagingFormats.Lzma:
+                ReadLzma();
+                break;
+            default:
+                break;
         }
     }
 
@@ -359,4 +545,5 @@ public partial class MainWindow : Window
     private void btnWrite_Click(object sender, RoutedEventArgs e)
     {
     }
+
 }

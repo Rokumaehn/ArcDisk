@@ -44,6 +44,7 @@
         <StackPanel Margin="10,10,10,10" Grid.Row="1" Grid.Column="0" Orientation="Vertical">
             <ProgressBar Name="progIo" HorizontalAlignment="Stretch" VerticalAlignment="Top" Height="30" Value="0" />
             <StackPanel Orientation="Horizontal">
+                <ComboBox x:Name="cmbFormat" Margin="10,10,10,10" />    
                 <Button x:Name="btnRead" Content="Read" Click="btnRead_Click" Padding="5" Margin="10,10,10,10" />
                 <Button x:Name="btnWrite" Content="Write" Click="btnWrite_Click" Padding="5" Margin="10,10,10,10" />
                 <CheckBox x:Name="chkAllocd" Content="Read only allocated" Margin="10,10,10,10" />
