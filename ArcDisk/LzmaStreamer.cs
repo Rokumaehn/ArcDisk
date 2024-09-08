@@ -6,26 +6,32 @@ namespace ArcDisk;
 
 public static class LzmaStreamer
 {
-    public static void Compress(Stream output, Stream input, long inputLength, ICodeProgress progress)
+    public static SevenZip.Compression.LZMA.Encoder encoder;
+
+    public static void Compress(Stream output, Stream input, long inputLength, ICodeProgress progress, bool writeProperties = true)
     {
-        SevenZip.Compression.LZMA.Encoder coder = new SevenZip.Compression.LZMA.Encoder();
+        encoder = new SevenZip.Compression.LZMA.Encoder();
 
         // Write the encoder properties
-        coder.SetCoderProperties(new CoderPropID[] {
+        encoder.SetCoderProperties(new CoderPropID[] {
             CoderPropID.DictionarySize,
         }, new object[] {
             1024 * 1024 * 64,
         });
-        coder.WriteCoderProperties(output);
-        
-        // Write the decompressed file size.
-        for (int i = 0; i < 8; i++)
+
+        if(writeProperties)
         {
-            output.WriteByte((byte)(input.Length >> (8 * i)));
+            encoder.WriteCoderProperties(output);
+            
+            // Write the decompressed file size.
+            for (int i = 0; i < 8; i++)
+            {
+                output.WriteByte((byte)(input.Length >> (8 * i)));
+            }
         }
 
         // do the magic
-        coder.Code(input, output, inputLength, -1, progress);
+        encoder.Code(input, output, inputLength, -1, progress);
     }
 
     public static bool Decompress(Stream output, Stream input, long outputLength, ICodeProgress progress)

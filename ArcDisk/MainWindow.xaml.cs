@@ -1,6 +1,7 @@
 ﻿using System.Collections.ObjectModel;
 using System.IO;
 using System.IO.Compression;
+using System.Runtime.Intrinsics.Arm;
 using System.Text;
 using System.Timers;
 using System.Windows;
@@ -13,6 +14,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Navigation;
 using Microsoft.Management.Infrastructure;
+using Microsoft.VisualBasic;
 using Microsoft.Win32;
 using RawDiskLib;
 using SevenZip;
@@ -129,7 +131,8 @@ public partial class MainWindow : Window
     public enum ImagingFormats
     {
         Zip,
-        Lzma
+        Lzma,
+        SevenZip
     }
 
     public class CompressionProgress : ICodeProgress
@@ -309,9 +312,15 @@ public partial class MainWindow : Window
 
             // LZMA part
             
-            //CurrentSizeToRead = 1024 * 1024 * 100; // FOR TESTING
+            var st = new WrappedDiskStream(CurrentDiskStream, CurrentSizeToRead);
+            // // TESTING
+            // var test = 1024 * 1024 * 100;
+            // var st = new WrappedDiskStream(CurrentDiskStream, CurrentSizeToRead - test, test);
+            // CurrentSizeToRead = test;
+            // // END TESTING
+
             CurrentArchiveStream = new FileStream(path, FileMode.Create, FileAccess.Write);
-            IoTask = Task.Run(() => { LzmaStreamer.Compress(CurrentArchiveStream, new RawDiskStreamTruncatedRead(CurrentDiskStream, CurrentSizeToRead), CurrentSizeToRead, new CompressionProgress(this)); });
+            IoTask = Task.Run(() => { LzmaStreamer.Compress(CurrentArchiveStream, st, CurrentSizeToRead, new CompressionProgress(this)); });
 
             CurrentOperation = ImagingOperations.Read;
 
@@ -338,73 +347,116 @@ public partial class MainWindow : Window
         }
     }
 
-    public class RawDiskStreamTruncatedRead : Stream
+
+
+    protected void Read7z()
     {
-        protected RawDiskStream DiskStream;
-        protected long MaxLen;
-
-        public RawDiskStreamTruncatedRead(RawDiskStream diskStream, long maxLen)
+        SaveFileDialog saveFileDialog = new SaveFileDialog();
+        saveFileDialog.Filter = "Compressed Image (*.img.7z)|*.img.7z";
+        if (saveFileDialog.ShowDialog() == true)
         {
-            DiskStream = diskStream;
-            MaxLen = maxLen;
-        }
-
-        public override bool CanRead => DiskStream.CanRead;
-
-        public override bool CanSeek => DiskStream.CanSeek;
-
-        public override bool CanWrite => DiskStream.CanWrite;
-
-        public override long Length => MaxLen;
-
-        long _position = 0;
-        public override long Position { get => _position; set => DiskStream.Position = value; }
-
-        public override void Flush()
-        {
-            DiskStream.Flush();
-        }
-
-        public override int Read(byte[] buffer, int offset, int count)
-        {
-            if(_position + count >= MaxLen)
+            var disk = lstDrives.SelectedItem as DiskListItem;
+            if (disk == null)
             {
-                count = (int)(MaxLen - _position);
+                return;
             }
 
-            if(count <= 0)
+            var path = saveFileDialog.FileName;
+            var imgFileName = Path.GetFileNameWithoutExtension(path);
+            CurrentSizeToRead = disk.Size;
+            var physicalIndex = disk.PhysicalIndex;
+
+            CurrentDisk = new RawDiskLib.RawDisk(RawDiskLib.DiskNumberType.PhysicalDisk, physicalIndex, System.IO.FileAccess.Read);
+            CurrentDiskStream = CurrentDisk.CreateDiskStream();
+            if(chkAllocd.IsChecked == true)
             {
-                return 0;
+                CurrentSizeToRead = GetAllocatedSize(CurrentDisk);
             }
+            btnRead.IsEnabled = false;
+            btnWrite.IsEnabled = false;
+            lastBytesRead = 0;
 
-            var actual = DiskStream.Read(buffer, offset, count);
-            if(actual > count)
+            // LZMA part
+            
+            //var st = new WrappedDiskStream(CurrentDiskStream, CurrentSizeToRead);
+            // TESTING
+            var test = 1024 * 1024 * 100;
+            var st = new WrappedDiskStream(CurrentDiskStream, CurrentSizeToRead - test, test);
+            CurrentSizeToRead = test;
+            // END TESTING
+
+            CurrentArchiveStream = new FileStream(path, FileMode.Create, FileAccess.Write);
+            CurrentArchiveStream.Write(Encoding.ASCII.GetBytes("7z"), 0, 2);
+            CurrentArchiveStream.Write([0xbc, 0xaf, 0x27, 0x1c, 0, 4], 0, 6);
+            CurrentArchiveStream.Write(BitConverter.GetBytes((UInt32)0), 0, 4); // StartHeader CRC
+            CurrentArchiveStream.Write(BitConverter.GetBytes((UInt64)0), 0, 8); // NextHeaderOffset
+            CurrentArchiveStream.Write(BitConverter.GetBytes((UInt64)0), 0, 8); // NextHeaderSize
+            CurrentArchiveStream.Write(BitConverter.GetBytes((UInt32)0), 0, 4); // NextHeaderCRC
+            IoTask = Task.Run(() => { LzmaStreamer.Compress(CurrentArchiveStream, st, CurrentSizeToRead, new CompressionProgress(this), false); });
+
+            CurrentOperation = ImagingOperations.Read;
+
+            IoTask.ContinueWith((t) =>
             {
-                var diff = count - actual;
-                DiskStream.Seek(diff, SeekOrigin.Current);
-                _position += count;
-                return count;
-            }
+                CurrentDiskStream.Close();
+                CurrentDiskStream = null;
+                CurrentDisk = null;
 
-            _position += actual;
-            return actual;
-        }
+                Complete7zArchive(CurrentArchiveStream, (ulong)CurrentSizeToRead, imgFileName, DateTime.Now, st.Crc.GetCurrentHashAsUInt32());
 
-        public override long Seek(long offset, SeekOrigin origin)
-        {
-            return DiskStream.Seek(offset, origin);
-        }
+                CurrentArchiveStream.Close();
+                CurrentArchiveStream.Dispose();
+                CurrentArchiveStream = null;
 
-        public override void SetLength(long value)
-        {
-            DiskStream.SetLength(value);
-        }
+                CurrentSizeToRead = 0;
+                CurrentOperation = ImagingOperations.None;
+                progIo.Dispatcher.Invoke(() =>
+                {
+                    btnRead.IsEnabled = true;
+                    btnWrite.IsEnabled = true;
+                    progIo.Value = 0;
+                });
+            });
 
-        public override void Write(byte[] buffer, int offset, int count)
-        {
-            DiskStream.Write(buffer, offset, count);
         }
     }
+
+
+    protected void Complete7zArchive(FileStream stream, ulong unpackedSize, string fileName, DateTime fileMTime, UInt32 streamCrc)
+    {
+        ulong packedSize = (ulong)(stream.Length) - 32UL;
+
+        byte[] encoderProps;
+        using(var ms = new MemoryStream())
+        {
+            LzmaStreamer.encoder.WriteCoderProperties(ms);
+            ms.Flush();
+            encoderProps = ms.ToArray();
+        }
+
+        var header = SevenZipHeader.GetHeader(fileName, packedSize, unpackedSize, encoderProps, fileMTime, streamCrc);
+        stream.Write(header, 0, header.Length);
+
+        System.IO.Hashing.Crc32 crc = new System.IO.Hashing.Crc32();
+        crc.Append(header);
+        var crcHeader = crc.GetCurrentHash();
+        crc.Reset();
+        List<byte> lst = new List<byte>();
+        lst.AddRange(BitConverter.GetBytes((UInt64)packedSize));
+        lst.AddRange(BitConverter.GetBytes((UInt64)header.Length));
+        lst.AddRange(crcHeader);
+        crc.Append(lst.ToArray());
+        var crcStartHeader = crc.GetCurrentHash();
+
+        stream.Seek(8, SeekOrigin.Begin);
+        stream.Write(crcStartHeader, 0, 4); // StartHeader CRC
+        stream.Write(BitConverter.GetBytes((UInt64)packedSize), 0, 8); // NextHeader Offset
+        stream.Write(BitConverter.GetBytes((UInt64)header.Length), 0, 8); // NextHeader Size
+        stream.Write(crcHeader, 0, 4); // NextHeader CRC
+        stream.Flush();
+    }
+
+    
 
     private void btnRead_Click(object sender, RoutedEventArgs e)
     {
@@ -420,6 +472,9 @@ public partial class MainWindow : Window
                 break;
             case ImagingFormats.Lzma:
                 ReadLzma();
+                break;
+            case ImagingFormats.SevenZip:
+                Read7z();
                 break;
             default:
                 break;
