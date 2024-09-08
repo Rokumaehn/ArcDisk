@@ -246,6 +246,7 @@ namespace SevenZip.Compression.LZMA
 				byte b = m_LiteralDecoder.DecodeNormal(m_RangeDecoder, 0, 0);
 				m_OutWindow.PutByte(b);
 				nowPos64++;
+				progress.SetProgress(0, (long)nowPos64);
 			}
 			while (nowPos64 < outSize64)
 			{
@@ -265,6 +266,7 @@ namespace SevenZip.Compression.LZMA
 						m_OutWindow.PutByte(b);
 						state.UpdateChar();
 						nowPos64++;
+						progress.SetProgress(0, (long)nowPos64);
 					}
 					else
 					{
@@ -278,6 +280,7 @@ namespace SevenZip.Compression.LZMA
 									state.UpdateShortRep();
 									m_OutWindow.PutByte(m_OutWindow.GetByte(rep0));
 									nowPos64++;
+									progress.SetProgress(0, (long)nowPos64);
 									continue;
 								}
 							}
@@ -338,6 +341,7 @@ namespace SevenZip.Compression.LZMA
 						}
 						m_OutWindow.CopyBlock(rep0, len);
 						nowPos64 += len;
+						progress.SetProgress(0, (long)nowPos64);
 					}
 				}
 			}

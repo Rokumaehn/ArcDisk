@@ -29,12 +29,12 @@ public partial class MainWindow : Window
     public ObservableCollection<DiskListItem> Disks { get; set; } = new ObservableCollection<DiskListItem>();
     public System.Threading.Timer Timer { get; set; }
 
-    private long lastBytesRead = 0;
+    private long lastBytesRW = 0;
     private long seconds = 0;
 
     private void ProgressTimerCallback(object? state)
     {
-        if(CurrentOperation == ImagingOperations.None || CurrentSizeToRead == 0)
+        if(CurrentOperation == ImagingOperations.None || CurrentSizeToRW == 0)
         {
             return;
         }
@@ -45,18 +45,18 @@ public partial class MainWindow : Window
 
         if(seconds % 10 == 0)
         {
-            var diff = cur - lastBytesRead;
-            lastBytesRead = cur;
+            var diff = cur - lastBytesRW;
+            lastBytesRW = cur;
 
             progIo.Dispatcher.Invoke(() =>
             {
-                txtProgress.Text = $"{diff/1024.0f/1024.0f/10.0} MB/s";
+                txtProgress.Text = $"{diff/1024.0f/1024.0f/10.0:0.###} MB/s";
             });
         }
 
         progIo.Dispatcher.Invoke(() =>
         {
-            progIo.Value = (int)(cur * 100.0 / CurrentSizeToRead);
+            progIo.Value = (int)(cur * 100.0 / CurrentSizeToRW);
         });
     }
 
@@ -112,11 +112,12 @@ public partial class MainWindow : Window
 
     public RawDiskLib.RawDisk CurrentDisk { get; set; }
     public RawDiskLib.RawDiskStream CurrentDiskStream { get; set; }
+    public BufferedHashingDiskStreamWriter CurrentDiskStreamWriter { get; set; }
     public FileStream CurrentArchiveStream { get; set; }
     public ZipArchive CurrentArchive { get; set; }
     public ZipArchiveEntry CurrentArchiveEntry { get; set; }
     public Stream CurrentArchiveEntryStream { get; set; }
-    public long CurrentSizeToRead { get; set; }
+    public long CurrentSizeToRW { get; set; }
     public Task IoTask { get; set; }
     public ImagingOperations CurrentOperation { get; set; }
     public ImagingFormats CurrentFormat => (ImagingFormats)cmbFormat.SelectedItem;
@@ -200,18 +201,18 @@ public partial class MainWindow : Window
 
             var path = saveFileDialog.FileName;
             var imgFileName = Path.GetFileNameWithoutExtension(path);
-            CurrentSizeToRead = disk.Size;
+            CurrentSizeToRW = disk.Size;
             var physicalIndex = disk.PhysicalIndex;
 
             CurrentDisk = new RawDiskLib.RawDisk(RawDiskLib.DiskNumberType.PhysicalDisk, physicalIndex, System.IO.FileAccess.Read);
             CurrentDiskStream = CurrentDisk.CreateDiskStream();
             if(chkAllocd.IsChecked == true)
             {
-                CurrentSizeToRead = GetAllocatedSize(CurrentDisk);
+                CurrentSizeToRW = GetAllocatedSize(CurrentDisk);
             }
             btnRead.IsEnabled = false;
             btnWrite.IsEnabled = false;
-            lastBytesRead = 0;
+            lastBytesRW = 0;
 
             // Option 1: Using dotntet ZipArchive
             
@@ -219,7 +220,7 @@ public partial class MainWindow : Window
             CurrentArchive = new ZipArchive(CurrentArchiveStream, ZipArchiveMode.Create, true);
             CurrentArchiveEntry = CurrentArchive.CreateEntry(imgFileName, CompressionLevel.SmallestSize);
             CurrentArchiveEntryStream = CurrentArchiveEntry.Open();
-            IoTask = CopyBytesAsync(CurrentSizeToRead, CurrentDiskStream, CurrentArchiveEntryStream);
+            IoTask = CopyBytesAsync(CurrentSizeToRW, CurrentDiskStream, CurrentArchiveEntryStream);
 
             CurrentOperation = ImagingOperations.Read;
 
@@ -239,7 +240,7 @@ public partial class MainWindow : Window
                 CurrentArchiveStream.Dispose();
                 CurrentArchiveStream = null;
 
-                CurrentSizeToRead = 0;
+                CurrentSizeToRW = 0;
                 CurrentOperation = ImagingOperations.None;
                 progIo.Dispatcher.Invoke(() =>
                 {
@@ -297,22 +298,22 @@ public partial class MainWindow : Window
 
             var path = saveFileDialog.FileName;
             var imgFileName = Path.GetFileNameWithoutExtension(path);
-            CurrentSizeToRead = disk.Size;
+            CurrentSizeToRW = disk.Size;
             var physicalIndex = disk.PhysicalIndex;
 
             CurrentDisk = new RawDiskLib.RawDisk(RawDiskLib.DiskNumberType.PhysicalDisk, physicalIndex, System.IO.FileAccess.Read);
             CurrentDiskStream = CurrentDisk.CreateDiskStream();
             if(chkAllocd.IsChecked == true)
             {
-                CurrentSizeToRead = GetAllocatedSize(CurrentDisk);
+                CurrentSizeToRW = GetAllocatedSize(CurrentDisk);
             }
             btnRead.IsEnabled = false;
             btnWrite.IsEnabled = false;
-            lastBytesRead = 0;
+            lastBytesRW = 0;
 
             // LZMA part
             
-            var st = new WrappedDiskStream(CurrentDiskStream, CurrentSizeToRead);
+            var st = new WrappedDiskStream(CurrentDiskStream, CurrentSizeToRW);
             // // TESTING
             // var test = 1024 * 1024 * 100;
             // var st = new WrappedDiskStream(CurrentDiskStream, CurrentSizeToRead - test, test);
@@ -320,7 +321,7 @@ public partial class MainWindow : Window
             // // END TESTING
 
             CurrentArchiveStream = new FileStream(path, FileMode.Create, FileAccess.Write);
-            IoTask = Task.Run(() => { LzmaStreamer.Compress(CurrentArchiveStream, st, CurrentSizeToRead, new CompressionProgress(this)); });
+            IoTask = Task.Run(() => { LzmaStreamer.Compress(CurrentArchiveStream, st, CurrentSizeToRW, new CompressionProgress(this)); });
 
             CurrentOperation = ImagingOperations.Read;
 
@@ -334,7 +335,7 @@ public partial class MainWindow : Window
                 CurrentArchiveStream.Dispose();
                 CurrentArchiveStream = null;
 
-                CurrentSizeToRead = 0;
+                CurrentSizeToRW = 0;
                 CurrentOperation = ImagingOperations.None;
                 progIo.Dispatcher.Invoke(() =>
                 {
@@ -363,36 +364,37 @@ public partial class MainWindow : Window
 
             var path = saveFileDialog.FileName;
             var imgFileName = Path.GetFileNameWithoutExtension(path);
-            CurrentSizeToRead = disk.Size;
+            CurrentSizeToRW = disk.Size;
             var physicalIndex = disk.PhysicalIndex;
 
             CurrentDisk = new RawDiskLib.RawDisk(RawDiskLib.DiskNumberType.PhysicalDisk, physicalIndex, System.IO.FileAccess.Read);
             CurrentDiskStream = CurrentDisk.CreateDiskStream();
             if(chkAllocd.IsChecked == true)
             {
-                CurrentSizeToRead = GetAllocatedSize(CurrentDisk);
+                CurrentSizeToRW = GetAllocatedSize(CurrentDisk);
             }
             btnRead.IsEnabled = false;
             btnWrite.IsEnabled = false;
-            lastBytesRead = 0;
+            lastBytesRW = 0;
 
             // LZMA part
             
-            //var st = new WrappedDiskStream(CurrentDiskStream, CurrentSizeToRead);
-            // TESTING
-            var test = 1024 * 1024 * 100;
-            var st = new WrappedDiskStream(CurrentDiskStream, CurrentSizeToRead - test, test);
-            CurrentSizeToRead = test;
-            // END TESTING
+            var st = new WrappedDiskStream(CurrentDiskStream, CurrentSizeToRW);
+            // // TESTING
+            // var test = 1024 * 1024 * 100;
+            // var st = new WrappedDiskStream(CurrentDiskStream, CurrentSizeToRead - test, test);
+            // CurrentSizeToRead = test;
+            // // END TESTING
 
-            CurrentArchiveStream = new FileStream(path, FileMode.Create, FileAccess.Write);
+            CurrentArchiveStream = new CrcFileStream(path, FileMode.Create, FileAccess.Write);
             CurrentArchiveStream.Write(Encoding.ASCII.GetBytes("7z"), 0, 2);
             CurrentArchiveStream.Write([0xbc, 0xaf, 0x27, 0x1c, 0, 4], 0, 6);
             CurrentArchiveStream.Write(BitConverter.GetBytes((UInt32)0), 0, 4); // StartHeader CRC
             CurrentArchiveStream.Write(BitConverter.GetBytes((UInt64)0), 0, 8); // NextHeaderOffset
             CurrentArchiveStream.Write(BitConverter.GetBytes((UInt64)0), 0, 8); // NextHeaderSize
             CurrentArchiveStream.Write(BitConverter.GetBytes((UInt32)0), 0, 4); // NextHeaderCRC
-            IoTask = Task.Run(() => { LzmaStreamer.Compress(CurrentArchiveStream, st, CurrentSizeToRead, new CompressionProgress(this), false); });
+            (CurrentArchiveStream as CrcFileStream)?.ResetCrc();
+            IoTask = Task.Run(() => { LzmaStreamer.Compress(CurrentArchiveStream, st, CurrentSizeToRW, new CompressionProgress(this), false); });
 
             CurrentOperation = ImagingOperations.Read;
 
@@ -402,13 +404,13 @@ public partial class MainWindow : Window
                 CurrentDiskStream = null;
                 CurrentDisk = null;
 
-                Complete7zArchive(CurrentArchiveStream, (ulong)CurrentSizeToRead, imgFileName, DateTime.Now, st.Crc.GetCurrentHashAsUInt32());
+                Complete7zArchive(CurrentArchiveStream, (ulong)CurrentSizeToRW, imgFileName, DateTime.Now, (CurrentArchiveStream as CrcFileStream)?.GetCrcUint() ?? 0);
 
                 CurrentArchiveStream.Close();
                 CurrentArchiveStream.Dispose();
                 CurrentArchiveStream = null;
 
-                CurrentSizeToRead = 0;
+                CurrentSizeToRW = 0;
                 CurrentOperation = ImagingOperations.None;
                 progIo.Dispatcher.Invoke(() =>
                 {
@@ -546,7 +548,7 @@ public partial class MainWindow : Window
                 return;
             }
 
-            CurrentSizeToRead = disk.Size;
+            CurrentSizeToRW = disk.Size;
             var physicalIndex = disk.PhysicalIndex;
 
             CurrentDisk = new RawDiskLib.RawDisk(RawDiskLib.DiskNumberType.PhysicalDisk, physicalIndex, System.IO.FileAccess.Read);
@@ -597,8 +599,201 @@ public partial class MainWindow : Window
         
     }
 
+    private void WriteZip(string filename, string imgFileName)
+    {
+        var disk = lstDrives.SelectedItem as DiskListItem;
+        if (disk == null)
+        {
+            return;
+        }
+
+        var path = filename;
+        var physicalIndex = disk.PhysicalIndex;
+
+        CurrentDisk = new RawDiskLib.RawDisk(RawDiskLib.DiskNumberType.PhysicalDisk, physicalIndex, System.IO.FileAccess.ReadWrite);
+        CurrentDiskStreamWriter = new BufferedHashingDiskStreamWriter(CurrentDisk.CreateDiskStream(), 1024 * 1024 * 4);
+        btnRead.IsEnabled = false;
+        btnWrite.IsEnabled = false;
+        cmbFormat.IsEnabled = false;
+        lastBytesRW = 0;
+
+        CurrentArchiveStream = new FileStream(path, FileMode.Open, FileAccess.Read);
+        CurrentArchive = new ZipArchive(CurrentArchiveStream, ZipArchiveMode.Read, true);
+        CurrentArchiveEntry = CurrentArchive.GetEntry(imgFileName);
+        CurrentSizeToRW = CurrentArchiveEntry.Length;
+        CurrentArchiveEntryStream = CurrentArchiveEntry.Open();
+        IoTask = CopyBytesAsync(CurrentSizeToRW, CurrentArchiveEntryStream, CurrentDiskStreamWriter);
+
+        CurrentOperation = ImagingOperations.Write;
+
+        IoTask.ContinueWith((t) =>
+        {
+            CurrentDiskStreamWriter.Close();
+            CurrentDiskStreamWriter = null;
+            CurrentDisk = null;
+
+            CurrentArchiveEntryStream.Close();
+            CurrentArchiveEntryStream.Dispose();
+            CurrentArchiveEntryStream = null;
+            CurrentArchiveEntry = null;
+            CurrentArchive.Dispose();
+            CurrentArchive = null;
+            CurrentArchiveStream.Close();
+            CurrentArchiveStream.Dispose();
+            CurrentArchiveStream = null;
+
+            CurrentSizeToRW = 0;
+            CurrentOperation = ImagingOperations.None;
+            progIo.Dispatcher.Invoke(() =>
+            {
+                btnRead.IsEnabled = true;
+                btnWrite.IsEnabled = true;
+                cmbFormat.IsEnabled = true;
+                progIo.Value = 0;
+            });
+        });
+    }
+
+    private void WriteLzma(string filename, string imgFileName)
+    {
+        var disk = lstDrives.SelectedItem as DiskListItem;
+        if (disk == null)
+        {
+            return;
+        }
+
+        var path = filename;
+        var physicalIndex = disk.PhysicalIndex;
+
+        CurrentDisk = new RawDiskLib.RawDisk(RawDiskLib.DiskNumberType.PhysicalDisk, physicalIndex, System.IO.FileAccess.ReadWrite);
+        CurrentDiskStreamWriter = new BufferedHashingDiskStreamWriter(CurrentDisk.CreateDiskStream(), 1024 * 1024 * 4);
+        CurrentSizeToRW = disk.Size;
+        btnRead.IsEnabled = false;
+        btnWrite.IsEnabled = false;
+        cmbFormat.IsEnabled = false;
+        lastBytesRW = 0;
+
+        CurrentArchiveStream = new FileStream(path, FileMode.Open, FileAccess.Read);
+        CurrentArchiveStream.Seek(5, SeekOrigin.Begin);
+        var buf = new byte[8];
+        CurrentArchiveStream.Read(buf, 0, 8);
+        CurrentSizeToRW = BitConverter.ToInt64(buf);
+        CurrentArchiveStream.Seek(0, SeekOrigin.Begin);
+        IoTask = Task.Run(() => { LzmaStreamer.Decompress(CurrentDiskStreamWriter, CurrentArchiveStream, CurrentSizeToRW, new DecompressionProgress(this)); });
+
+        CurrentOperation = ImagingOperations.Write;
+
+        IoTask.ContinueWith((t) =>
+        {
+            CurrentDiskStreamWriter.Close();
+            CurrentDiskStreamWriter = null;
+            CurrentDisk = null;
+
+            CurrentArchiveStream.Close();
+            CurrentArchiveStream.Dispose();
+            CurrentArchiveStream = null;
+
+            CurrentSizeToRW = 0;
+            CurrentOperation = ImagingOperations.None;
+            progIo.Dispatcher.Invoke(() =>
+            {
+                btnRead.IsEnabled = true;
+                btnWrite.IsEnabled = true;
+                cmbFormat.IsEnabled = true;
+                progIo.Value = 0;
+            });
+        });
+    }
+
+    private void Write7z(string filename, string imgFileName)
+    {
+        var disk = lstDrives.SelectedItem as DiskListItem;
+        if (disk == null)
+        {
+            return;
+        }
+
+        cmbFormat.SelectedItem = ImagingFormats.SevenZip;
+
+        var path = filename;
+        var physicalIndex = disk.PhysicalIndex;
+
+        CurrentDisk = new RawDiskLib.RawDisk(RawDiskLib.DiskNumberType.PhysicalDisk, physicalIndex, System.IO.FileAccess.ReadWrite);
+        CurrentDiskStreamWriter = new BufferedHashingDiskStreamWriter(CurrentDisk.CreateDiskStream(), 1024 * 1024 * 4);
+        btnRead.IsEnabled = false;
+        btnWrite.IsEnabled = false;
+        cmbFormat.IsEnabled = false;
+        lastBytesRW = 0;
+
+        CurrentArchiveStream = new FileStream(path, FileMode.Open, FileAccess.Read);
+        SevenZipHeader header = new(CurrentArchiveStream);
+        CurrentArchiveStream.Close();
+        CurrentArchiveStream.Dispose();
+        if(header.IsValid == false)
+        {
+            CurrentDiskStreamWriter.Close();
+            CurrentDiskStreamWriter = null;
+            CurrentDisk = null;
+            btnRead.IsEnabled = true;
+            btnWrite.IsEnabled = true;
+            cmbFormat.IsEnabled = true;
+            MessageBox.Show("Could not parse 7z archive", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+        CurrentArchiveStream = new WindowedFileStream(path, FileMode.Open, FileAccess.Read, 32, (long)(header.PackedSize));
+        CurrentSizeToRW = (long)(header.UnpackedSize);
+        CurrentArchiveStream.Seek(32, SeekOrigin.Begin);
+        IoTask = Task.Run(() => { LzmaStreamer.Decompress(CurrentDiskStreamWriter, CurrentArchiveStream, disk.Size, new DecompressionProgress(this), header.EncoderProperties, (long)(header.UnpackedSize)); });
+
+        CurrentOperation = ImagingOperations.Write;
+
+        IoTask.ContinueWith((t) =>
+        {
+            CurrentDiskStreamWriter.Close();
+            CurrentDiskStreamWriter = null;
+            CurrentDisk = null;
+
+            CurrentArchiveStream.Close();
+            CurrentArchiveStream.Dispose();
+            CurrentArchiveStream = null;
+
+            CurrentSizeToRW = 0;
+            CurrentOperation = ImagingOperations.None;
+            progIo.Dispatcher.Invoke(() =>
+            {
+                btnRead.IsEnabled = true;
+                btnWrite.IsEnabled = true;
+                cmbFormat.IsEnabled = true;
+                progIo.Value = 0;
+            });
+        });
+    }
+
     private void btnWrite_Click(object sender, RoutedEventArgs e)
     {
+        OpenFileDialog openFileDialog = new OpenFileDialog();
+        openFileDialog.Filter = "Image Disk Image(*.img.zip;*.img.lzma;*.img.7z)|*.img.zip;*.img.lzma;*.img.7z";
+        if (openFileDialog.ShowDialog() == true)
+        {
+            var filename = openFileDialog.FileName;
+            var extension = Path.GetExtension(filename);
+            var imgFileName = Path.GetFileNameWithoutExtension(filename);
+
+            switch (extension)
+            {
+                case ".zip":
+                    WriteZip(filename, imgFileName);
+                    break;
+                case ".lzma":
+                    WriteLzma(filename, imgFileName);
+                    break;
+                case ".7z":
+                    Write7z(filename, imgFileName);
+                    break;
+                default:
+                    break;
+            }
+        }
     }
 
 }

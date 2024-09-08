@@ -34,6 +34,22 @@ public static class LzmaStreamer
         encoder.Code(input, output, inputLength, -1, progress);
     }
 
+    public static bool Decompress(Stream output, Stream input, long outputLength, ICodeProgress progress, byte[] properties, long decompressedSize)
+    {
+        SevenZip.Compression.LZMA.Decoder coder = new SevenZip.Compression.LZMA.Decoder();
+
+        if(outputLength < decompressedSize)
+        {
+            return false;
+        }
+
+        // do the magic
+        coder.SetDecoderProperties(properties);
+        coder.Code(input, output, input.Length, decompressedSize, progress);
+
+        return true;
+    }
+
     public static bool Decompress(Stream output, Stream input, long outputLength, ICodeProgress progress)
     {
         SevenZip.Compression.LZMA.Decoder coder = new SevenZip.Compression.LZMA.Decoder();
