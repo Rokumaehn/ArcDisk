@@ -1,22 +1,10 @@
 ﻿using System.Collections.ObjectModel;
 using System.IO;
 using System.IO.Compression;
-using System.Runtime.Intrinsics.Arm;
 using System.Text;
-using System.Timers;
 using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Data;
-using System.Windows.Documents;
-using System.Windows.Input;
-using System.Windows.Interop;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Navigation;
 using Microsoft.Management.Infrastructure;
-using Microsoft.VisualBasic;
 using Microsoft.Win32;
-using RawDiskLib;
 using SevenZip;
 
 namespace ArcDisk;
@@ -66,8 +54,6 @@ public partial class MainWindow : Window
 
         Timer = new(ProgressTimerCallback, this, 0, 1000);
 
-        var test = RawDiskLib.Utils.GetAvailableDrives();
-
         lstDrives.ItemsSource = Disks;
         cmbFormat.ItemsSource = Enum.GetValues(typeof(ImagingFormats));
         cmbFormat.SelectedItem = ImagingFormats.Zip;
@@ -91,7 +77,8 @@ public partial class MainWindow : Window
             string? deviceId = deviceIdProperty.Value as string;
             var sizeProperty = instance.CimInstanceProperties["Size"];
             ulong size = (ulong)sizeProperty.Value;
-            var mediaTypeProperty = instance.CimInstanceProperties["MediaType"];
+            var bytesPerSectorProperty = instance.CimInstanceProperties["BytesPerSector"];
+            UInt32 bytesPerSector = (UInt32)bytesPerSectorProperty.Value;
 
             if(deviceId==null || size==0)
             {
@@ -103,16 +90,14 @@ public partial class MainWindow : Window
                 Caption = caption ?? "<N/A>",
                 Model = model ?? "<N/A>",
                 DeviceId = deviceId,
-                Size = (long)size
+                Size = (long)size,
+                BytesPerSector = (int)bytesPerSector
             });
         }
 
         
     }
 
-    public RawDiskLib.RawDisk CurrentDisk { get; set; }
-    public RawDiskLib.RawDiskStream CurrentDiskStream { get; set; }
-    public BufferedHashingDiskStreamWriter CurrentDiskStreamWriter { get; set; }
     public FileStream CurrentArchiveStream { get; set; }
     public ZipArchive CurrentArchive { get; set; }
     public ZipArchiveEntry CurrentArchiveEntry { get; set; }
@@ -204,31 +189,31 @@ public partial class MainWindow : Window
             CurrentSizeToRW = disk.Size;
             var physicalIndex = disk.PhysicalIndex;
 
-            CurrentDisk = new RawDiskLib.RawDisk(RawDiskLib.DiskNumberType.PhysicalDisk, physicalIndex, System.IO.FileAccess.Read);
-            CurrentDiskStream = CurrentDisk.CreateDiskStream();
+            var phys = new PhysicalDiskStream(physicalIndex, disk.BytesPerSector, disk.Size, FileAccess.Read);
             if(chkAllocd.IsChecked == true)
             {
-                CurrentSizeToRW = GetAllocatedSize(CurrentDisk);
+                CurrentSizeToRW = GetAllocatedSize(phys);
             }
+            var st = new WrappedPhysicalDiskStream(phys, CurrentSizeToRW);
+
             btnRead.IsEnabled = false;
             btnWrite.IsEnabled = false;
             lastBytesRW = 0;
-
-            // Option 1: Using dotntet ZipArchive
             
             CurrentArchiveStream = new FileStream(path, FileMode.Create, FileAccess.Write);
             CurrentArchive = new ZipArchive(CurrentArchiveStream, ZipArchiveMode.Create, true);
             CurrentArchiveEntry = CurrentArchive.CreateEntry(imgFileName, CompressionLevel.SmallestSize);
             CurrentArchiveEntryStream = CurrentArchiveEntry.Open();
-            IoTask = CopyBytesAsync(CurrentSizeToRW, CurrentDiskStream, CurrentArchiveEntryStream);
+            IoTask = CopyBytesAsync(CurrentSizeToRW, st, CurrentArchiveEntryStream);
 
             CurrentOperation = ImagingOperations.Read;
 
             IoTask.ContinueWith((t) =>
             {
-                CurrentDiskStream.Close();
-                CurrentDiskStream = null;
-                CurrentDisk = null;
+                st.Close();
+                st.Dispose();
+                phys.Close();
+                phys.Dispose();
 
                 CurrentArchiveEntryStream.Close();
                 CurrentArchiveEntryStream.Dispose();
@@ -250,37 +235,6 @@ public partial class MainWindow : Window
                 });
             });
 
-            // Option 2: Using SharpZipLib
-
-            // CurrentArchiveStream = new FileStream(path, FileMode.Create, FileAccess.ReadWrite);
-            // var zipStream = new ZipOutputStream(CurrentArchiveStream);
-            // zipStream.SetLevel(9);
-            // var entry = new ZipEntry(imgFileName);
-            // zipStream.PutNextEntry(entry);
-            // IoTask = CurrentDiskStream.CopyToAsync(zipStream);
-
-            // CurrentOperation = ImagingOperations.Read;
-            
-            // IoTask.ContinueWith((t) =>
-            // {
-            //     zipStream.Close();
-            //     CurrentDiskStream.Close();
-            //     CurrentArchiveStream.Close();
-
-            //     CurrentDiskStream = null;
-            //     CurrentDisk = null;
-            //     CurrentArchiveStream = null;
-            //     CurrentArchive = null;
-
-            //     CurrentSizeToRead = 0;
-            //     CurrentOperation = ImagingOperations.None;
-            //     progIo.Dispatcher.Invoke(() =>
-            //     {
-            //         btnRead.IsEnabled = true;
-            //         btnWrite.IsEnabled = true;
-            //         progIo.Value = 0;
-            //     });
-            // });
         }
     }
 
@@ -301,11 +255,10 @@ public partial class MainWindow : Window
             CurrentSizeToRW = disk.Size;
             var physicalIndex = disk.PhysicalIndex;
 
-            CurrentDisk = new RawDiskLib.RawDisk(RawDiskLib.DiskNumberType.PhysicalDisk, physicalIndex, System.IO.FileAccess.Read);
-            CurrentDiskStream = CurrentDisk.CreateDiskStream();
+            var phys = new PhysicalDiskStream(physicalIndex, disk.BytesPerSector, disk.Size, FileAccess.Read);
             if(chkAllocd.IsChecked == true)
             {
-                CurrentSizeToRW = GetAllocatedSize(CurrentDisk);
+                CurrentSizeToRW = GetAllocatedSize(phys);
             }
             btnRead.IsEnabled = false;
             btnWrite.IsEnabled = false;
@@ -313,11 +266,11 @@ public partial class MainWindow : Window
 
             // LZMA part
             
-            var st = new WrappedDiskStream(CurrentDiskStream, CurrentSizeToRW);
+            var st = new WrappedPhysicalDiskStream(phys, CurrentSizeToRW);
             // // TESTING
             // var test = 1024 * 1024 * 100;
-            // var st = new WrappedDiskStream(CurrentDiskStream, CurrentSizeToRead - test, test);
-            // CurrentSizeToRead = test;
+            // var st = new WrappedPhysicalDiskStream(phys, CurrentSizeToRW - test, test);
+            // CurrentSizeToRW = test;
             // // END TESTING
 
             CurrentArchiveStream = new FileStream(path, FileMode.Create, FileAccess.Write);
@@ -327,9 +280,10 @@ public partial class MainWindow : Window
 
             IoTask.ContinueWith((t) =>
             {
-                CurrentDiskStream.Close();
-                CurrentDiskStream = null;
-                CurrentDisk = null;
+                st.Close();
+                st.Dispose();
+                phys.Close();
+                phys.Dispose();
 
                 CurrentArchiveStream.Close();
                 CurrentArchiveStream.Dispose();
@@ -367,22 +321,22 @@ public partial class MainWindow : Window
             CurrentSizeToRW = disk.Size;
             var physicalIndex = disk.PhysicalIndex;
 
-            CurrentDisk = new RawDiskLib.RawDisk(RawDiskLib.DiskNumberType.PhysicalDisk, physicalIndex, System.IO.FileAccess.Read);
-            CurrentDiskStream = CurrentDisk.CreateDiskStream();
+            var phys = new PhysicalDiskStream(physicalIndex, disk.BytesPerSector, disk.Size, FileAccess.Read);
             if(chkAllocd.IsChecked == true)
             {
-                CurrentSizeToRW = GetAllocatedSize(CurrentDisk);
+                CurrentSizeToRW = GetAllocatedSize(phys);
             }
+
             btnRead.IsEnabled = false;
             btnWrite.IsEnabled = false;
             lastBytesRW = 0;
 
             // LZMA part
             
-            var st = new WrappedDiskStream(CurrentDiskStream, CurrentSizeToRW);
+            var st = new WrappedPhysicalDiskStream(phys, CurrentSizeToRW);
             // // TESTING
             // var test = 1024 * 1024 * 100;
-            // var st = new WrappedDiskStream(CurrentDiskStream, CurrentSizeToRead - test, test);
+            // var st = new WrappedPhysicalDiskStream(phys, CurrentSizeToRead - test, test);
             // CurrentSizeToRead = test;
             // // END TESTING
 
@@ -400,9 +354,10 @@ public partial class MainWindow : Window
 
             IoTask.ContinueWith((t) =>
             {
-                CurrentDiskStream.Close();
-                CurrentDiskStream = null;
-                CurrentDisk = null;
+                st.Close();
+                st.Dispose();
+                phys.Close();
+                phys.Dispose();
 
                 Complete7zArchive(CurrentArchiveStream, (ulong)CurrentSizeToRW, imgFileName, DateTime.Now, (CurrentArchiveStream as CrcFileStream)?.GetCrcUint() ?? 0);
 
@@ -497,9 +452,11 @@ public partial class MainWindow : Window
         public long Offset { get; set; }
     }
 
-    public long GetAllocatedSize(RawDisk disk)
+    public long GetAllocatedSize(PhysicalDiskStream disk)
     {
-        var mbr = CurrentDisk.ReadSectors(0, 1);
+        var mbr = new byte[512];
+        disk.ReadSector(mbr);
+        disk.Seek(0, SeekOrigin.Begin);
         var parts = new List<PartitionInfo>();
         for(int i=0; i < 4; i++)
         {
@@ -541,61 +498,112 @@ public partial class MainWindow : Window
             return;
         }
 
+        var disk = lstDrives.SelectedItem as DiskListItem;
+        if (disk == null)
+        {
+            return;
+        }
 
-            var disk = lstDrives.SelectedItem as DiskListItem;
-            if (disk == null)
+        btnQuery.IsEnabled = false;
+        btnRead.IsEnabled = false;
+        btnWrite.IsEnabled = false;
+        cmbFormat.IsEnabled = false;
+
+        var phys = new PhysicalDiskStream(disk.PhysicalIndex, disk.BytesPerSector, disk.Size, FileAccess.Read);
+        var file = new FileStream(@"C:\amiga\backups\Emu68-32GB-Kioxia.img", FileMode.Open, FileAccess.Read);
+
+        var c0 = 0;
+        var c1 = 0;
+        var buffer = new byte[1024 * 1024 * 64];
+        var comp = new byte[1024 * 1024 * 64];
+        c0 = phys.Read(buffer, 0, buffer.Length);
+        c1 = file.Read(comp, 0, comp.Length);
+        int iBlockOffset = 0;
+        while(c0 > 0 && c1 > 0)
+        {
+            if(c0 != c1)
             {
-                return;
+                Console.WriteLine("Length Mismatch.");
+                break;
             }
 
-            CurrentSizeToRW = disk.Size;
-            var physicalIndex = disk.PhysicalIndex;
-
-            CurrentDisk = new RawDiskLib.RawDisk(RawDiskLib.DiskNumberType.PhysicalDisk, physicalIndex, System.IO.FileAccess.Read);
-            CurrentDiskStream = CurrentDisk.CreateDiskStream();
-            var mbr = CurrentDisk.ReadSectors(0, 1);
-            var parts = new List<PartitionInfo>();
-            for(int i=0; i < 4; i++)
+            for(int i=0; i < c0; i++)
             {
-                var offset = 446 + i * 16;
-                var type = mbr[offset + 4];
-                if(type == 0)
+                if(buffer[i] != comp[i])
                 {
-                    continue;
+                    Console.WriteLine("Mismatch Block {0} Offset in Block {1} Offset in File{2}.", iBlockOffset, i, iBlockOffset * 1024 * 1024 * 64 + i);
+                    break;
                 }
-
-                var chsFirst = BitConverter.ToUInt32(mbr, offset + 1);
-                var chsLast = BitConverter.ToUInt32(mbr, offset + 5);
-
-                var partition = new PartitionInfo
-                {
-                    Name = $"Partition {i}",
-                    Type = type.ToString(),
-                    FirstCylinder = (chsFirst & 0x00FF00 << 2) | (chsFirst >> 16) & 0xFF,
-                    FirstHead = (chsFirst) & 0xFF,
-                    FirstSector = (chsFirst >> 8) & 0x3F,
-                    LastCylinder = (chsLast & 0x00FF00 << 2) | (chsLast >> 16) & 0xFF,
-                    LastHead = (chsLast) & 0xFF,
-                    LastSector = (chsLast >> 8) & 0x3F,
-                    Offset = BitConverter.ToUInt32(mbr, offset + 8),
-                    Size = BitConverter.ToUInt32(mbr, offset + 12)
-                };
-                parts.Add(partition);
-
-                Console.WriteLine(partition);
             }
 
-            var last = parts.Last();
+            if(c0 < 1024 * 1024 * 64)
+            {
+                break;
+            }
 
-            var s1 = CurrentDisk.ReadSectors(last.Offset + last.Size - 1, 1);
-            var s2 = CurrentDisk.ReadSectors(last.Offset + last.Size, 1);
-            var s3 = CurrentDisk.ReadSectors(last.Offset + last.Size + 1, 1);
+            c0 = phys.Read(buffer, 0, buffer.Length);
+            c1 = file.Read(comp, 0, comp.Length);
+            iBlockOffset++;
+        }
 
-            var allocSizeMB = ((last.Offset + last.Size) * 512) / 1024.0 / 1024.0;
+        file.Close();
+        file.Dispose();
+        phys.Close();
+        phys.Dispose();
 
-            CurrentDiskStream.Close();
-            CurrentDiskStream = null;
-            CurrentDisk = null;
+        btnQuery.IsEnabled = true;
+        btnRead.IsEnabled = true;
+        btnWrite.IsEnabled = true;
+        cmbFormat.IsEnabled = true;
+
+        // CurrentSizeToRW = disk.Size;
+        // var physicalIndex = disk.PhysicalIndex;
+
+        // CurrentDisk = new RawDiskLib.RawDisk(RawDiskLib.DiskNumberType.PhysicalDisk, physicalIndex, System.IO.FileAccess.Read);
+        // CurrentDiskStream = CurrentDisk.CreateDiskStream();
+        // var mbr = CurrentDisk.ReadSectors(0, 1);
+        // var parts = new List<PartitionInfo>();
+        // for(int i=0; i < 4; i++)
+        // {
+        //     var offset = 446 + i * 16;
+        //     var type = mbr[offset + 4];
+        //     if(type == 0)
+        //     {
+        //         continue;
+        //     }
+
+        //     var chsFirst = BitConverter.ToUInt32(mbr, offset + 1);
+        //     var chsLast = BitConverter.ToUInt32(mbr, offset + 5);
+
+        //     var partition = new PartitionInfo
+        //     {
+        //         Name = $"Partition {i}",
+        //         Type = type.ToString(),
+        //         FirstCylinder = (chsFirst & 0x00FF00 << 2) | (chsFirst >> 16) & 0xFF,
+        //         FirstHead = (chsFirst) & 0xFF,
+        //         FirstSector = (chsFirst >> 8) & 0x3F,
+        //         LastCylinder = (chsLast & 0x00FF00 << 2) | (chsLast >> 16) & 0xFF,
+        //         LastHead = (chsLast) & 0xFF,
+        //         LastSector = (chsLast >> 8) & 0x3F,
+        //         Offset = BitConverter.ToUInt32(mbr, offset + 8),
+        //         Size = BitConverter.ToUInt32(mbr, offset + 12)
+        //     };
+        //     parts.Add(partition);
+
+        //     Console.WriteLine(partition);
+        // }
+
+        // var last = parts.Last();
+
+        // var s1 = CurrentDisk.ReadSectors(last.Offset + last.Size - 1, 1);
+        // var s2 = CurrentDisk.ReadSectors(last.Offset + last.Size, 1);
+        // var s3 = CurrentDisk.ReadSectors(last.Offset + last.Size + 1, 1);
+
+        // var allocSizeMB = ((last.Offset + last.Size) * 512) / 1024.0 / 1024.0;
+
+        // CurrentDiskStream.Close();
+        // CurrentDiskStream = null;
+        // CurrentDisk = null;
         
     }
 
@@ -610,8 +618,8 @@ public partial class MainWindow : Window
         var path = filename;
         var physicalIndex = disk.PhysicalIndex;
 
-        CurrentDisk = new RawDiskLib.RawDisk(RawDiskLib.DiskNumberType.PhysicalDisk, physicalIndex, System.IO.FileAccess.ReadWrite);
-        CurrentDiskStreamWriter = new BufferedHashingDiskStreamWriter(CurrentDisk.CreateDiskStream(), 1024 * 1024 * 4);
+        var phys = new PhysicalDiskStream(physicalIndex, disk.BytesPerSector, disk.Size, FileAccess.Write);
+
         btnRead.IsEnabled = false;
         btnWrite.IsEnabled = false;
         cmbFormat.IsEnabled = false;
@@ -622,15 +630,14 @@ public partial class MainWindow : Window
         CurrentArchiveEntry = CurrentArchive.GetEntry(imgFileName);
         CurrentSizeToRW = CurrentArchiveEntry.Length;
         CurrentArchiveEntryStream = CurrentArchiveEntry.Open();
-        IoTask = CopyBytesAsync(CurrentSizeToRW, CurrentArchiveEntryStream, CurrentDiskStreamWriter);
+        IoTask = CopyBytesAsync(CurrentSizeToRW, CurrentArchiveEntryStream, phys);
 
         CurrentOperation = ImagingOperations.Write;
 
         IoTask.ContinueWith((t) =>
         {
-            CurrentDiskStreamWriter.Close();
-            CurrentDiskStreamWriter = null;
-            CurrentDisk = null;
+            phys.Close();
+            phys.Dispose();
 
             CurrentArchiveEntryStream.Close();
             CurrentArchiveEntryStream.Dispose();
@@ -665,8 +672,8 @@ public partial class MainWindow : Window
         var path = filename;
         var physicalIndex = disk.PhysicalIndex;
 
-        CurrentDisk = new RawDiskLib.RawDisk(RawDiskLib.DiskNumberType.PhysicalDisk, physicalIndex, System.IO.FileAccess.ReadWrite);
-        CurrentDiskStreamWriter = new BufferedHashingDiskStreamWriter(CurrentDisk.CreateDiskStream(), 1024 * 1024 * 4);
+        var phys = new PhysicalDiskStream(physicalIndex, disk.BytesPerSector, disk.Size, FileAccess.Write);
+
         CurrentSizeToRW = disk.Size;
         btnRead.IsEnabled = false;
         btnWrite.IsEnabled = false;
@@ -679,15 +686,15 @@ public partial class MainWindow : Window
         CurrentArchiveStream.Read(buf, 0, 8);
         CurrentSizeToRW = BitConverter.ToInt64(buf);
         CurrentArchiveStream.Seek(0, SeekOrigin.Begin);
-        IoTask = Task.Run(() => { LzmaStreamer.Decompress(CurrentDiskStreamWriter, CurrentArchiveStream, CurrentSizeToRW, new DecompressionProgress(this)); });
+        IoTask = Task.Run(() => { LzmaStreamer.Decompress(phys, CurrentArchiveStream, CurrentSizeToRW, new DecompressionProgress(this)); });
 
         CurrentOperation = ImagingOperations.Write;
 
         IoTask.ContinueWith((t) =>
         {
-            CurrentDiskStreamWriter.Close();
-            CurrentDiskStreamWriter = null;
-            CurrentDisk = null;
+            phys.Flush();
+            phys.Close();
+            phys.Dispose();
 
             CurrentArchiveStream.Close();
             CurrentArchiveStream.Dispose();
@@ -718,8 +725,8 @@ public partial class MainWindow : Window
         var path = filename;
         var physicalIndex = disk.PhysicalIndex;
 
-        CurrentDisk = new RawDiskLib.RawDisk(RawDiskLib.DiskNumberType.PhysicalDisk, physicalIndex, System.IO.FileAccess.ReadWrite);
-        CurrentDiskStreamWriter = new BufferedHashingDiskStreamWriter(CurrentDisk.CreateDiskStream(), 1024 * 1024 * 4);
+        var phys = new PhysicalDiskStream(physicalIndex, disk.BytesPerSector, disk.Size, FileAccess.Write);
+
         btnRead.IsEnabled = false;
         btnWrite.IsEnabled = false;
         cmbFormat.IsEnabled = false;
@@ -731,9 +738,9 @@ public partial class MainWindow : Window
         CurrentArchiveStream.Dispose();
         if(header.IsValid == false)
         {
-            CurrentDiskStreamWriter.Close();
-            CurrentDiskStreamWriter = null;
-            CurrentDisk = null;
+            phys.Close();
+            phys.Dispose();
+            phys = null;
             btnRead.IsEnabled = true;
             btnWrite.IsEnabled = true;
             cmbFormat.IsEnabled = true;
@@ -743,15 +750,15 @@ public partial class MainWindow : Window
         CurrentArchiveStream = new WindowedFileStream(path, FileMode.Open, FileAccess.Read, 32, (long)(header.PackedSize));
         CurrentSizeToRW = (long)(header.UnpackedSize);
         CurrentArchiveStream.Seek(32, SeekOrigin.Begin);
-        IoTask = Task.Run(() => { LzmaStreamer.Decompress(CurrentDiskStreamWriter, CurrentArchiveStream, disk.Size, new DecompressionProgress(this), header.EncoderProperties, (long)(header.UnpackedSize)); });
+        IoTask = Task.Run(() => { LzmaStreamer.Decompress(phys, CurrentArchiveStream, disk.Size, new DecompressionProgress(this), header.EncoderProperties, (long)(header.UnpackedSize)); });
 
         CurrentOperation = ImagingOperations.Write;
 
         IoTask.ContinueWith((t) =>
         {
-            CurrentDiskStreamWriter.Close();
-            CurrentDiskStreamWriter = null;
-            CurrentDisk = null;
+            phys.Flush();
+            phys.Close();
+            phys.Dispose();
 
             CurrentArchiveStream.Close();
             CurrentArchiveStream.Dispose();

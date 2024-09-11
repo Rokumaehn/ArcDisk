@@ -1,140 +1,142 @@
-using System.IO;
-using RawDiskLib;
+// File only kept for reference
 
-namespace ArcDisk;
+// using System.IO;
+// using RawDiskLib;
 
-public class WrappedDiskStream : Stream
-{
-    protected RawDiskStream DiskStream;
-    protected long MaxLen;
-    protected long Offset;
+// namespace ArcDisk;
 
-    public WrappedDiskStream(RawDiskStream diskStream, long maxLen)
-    {
-        DiskStream = diskStream;
-        MaxLen = maxLen;
-        Offset = 0;
-    }
+// public class WrappedDiskStream : Stream
+// {
+//     protected RawDiskStream DiskStream;
+//     protected long MaxLen;
+//     protected long Offset;
 
-    public WrappedDiskStream(RawDiskStream diskStream, long offset, long maxLen)
-    {
-        DiskStream = diskStream;
-        MaxLen = maxLen;
-        Offset = offset;
-        DiskStream.Seek(offset, SeekOrigin.Begin);
-    }
+//     public WrappedDiskStream(RawDiskStream diskStream, long maxLen)
+//     {
+//         DiskStream = diskStream;
+//         MaxLen = maxLen;
+//         Offset = 0;
+//     }
 
-    public override bool CanRead => DiskStream.CanRead;
+//     public WrappedDiskStream(RawDiskStream diskStream, long offset, long maxLen)
+//     {
+//         DiskStream = diskStream;
+//         MaxLen = maxLen;
+//         Offset = offset;
+//         DiskStream.Seek(offset, SeekOrigin.Begin);
+//     }
 
-    public override bool CanSeek => DiskStream.CanSeek;
+//     public override bool CanRead => DiskStream.CanRead;
 
-    public override bool CanWrite => DiskStream.CanWrite;
+//     public override bool CanSeek => DiskStream.CanSeek;
 
-    public override long Length => MaxLen;
+//     public override bool CanWrite => DiskStream.CanWrite;
 
-    long _position = 0;
+//     public override long Length => MaxLen;
 
-    byte[] _buffer;
+//     long _position = 0;
 
-    public override long Position { get => _position; set => DiskStream.Position = value; }
+//     byte[] _buffer;
 
-    public override void Flush()
-    {
-        DiskStream.Flush();
-    }
+//     public override long Position { get => _position; set => DiskStream.Position = value; }
 
-    // public override int Read(byte[] buffer, int offset, int count)
-    // {
-    //     if(_position + count >= MaxLen)
-    //     {
-    //         count = (int)(MaxLen - _position);
-    //     }
+//     public override void Flush()
+//     {
+//         DiskStream.Flush();
+//     }
 
-    //     if(count <= 0)
-    //     {
-    //         return 0;
-    //     }
+//     // public override int Read(byte[] buffer, int offset, int count)
+//     // {
+//     //     if(_position + count >= MaxLen)
+//     //     {
+//     //         count = (int)(MaxLen - _position);
+//     //     }
 
-    //     var actual = DiskStream.Read(buffer, offset, count);
-    //     if(actual > count)
-    //     {
-    //         var diff = count - actual;
-    //         DiskStream.Seek(diff, SeekOrigin.Current);
-    //         _position += count;
-    //         return count;
-    //     }
+//     //     if(count <= 0)
+//     //     {
+//     //         return 0;
+//     //     }
 
-    //     _position += actual;
-    //     return actual;
-    // }
+//     //     var actual = DiskStream.Read(buffer, offset, count);
+//     //     if(actual > count)
+//     //     {
+//     //         var diff = count - actual;
+//     //         DiskStream.Seek(diff, SeekOrigin.Current);
+//     //         _position += count;
+//     //         return count;
+//     //     }
 
-    public System.IO.Hashing.Crc32 Crc { get; set; } = new System.IO.Hashing.Crc32();
+//     //     _position += actual;
+//     //     return actual;
+//     // }
 
-    public override int Read(byte[] buffer, int offset, int count)
-    {
-        int cntRead = 0;
+//     public System.IO.Hashing.Crc32 Crc { get; set; } = new System.IO.Hashing.Crc32();
 
-        if (_position + count >= MaxLen)
-        {
-            count = (int)(MaxLen - _position);
-        }
+//     public override int Read(byte[] buffer, int offset, int count)
+//     {
+//         int cntRead = 0;
 
-        if (_buffer != null)
-        {
-            var toCopy = Math.Min(count, _buffer.Length);
-            Array.Copy(_buffer, 0, buffer, offset, toCopy);
-            _position += toCopy;
-            if (count < _buffer.Length)
-            {
-                _buffer = _buffer.AsSpan().Slice(toCopy).ToArray();
-                Crc.Append(buffer.AsSpan(offset, count));
-                return toCopy;
-            }
-            else if (count == _buffer.Length)
-            {
-                _buffer = null;
-                Crc.Append(buffer.AsSpan(offset, count));
-                return toCopy;
-            }
-            // at this point, count > _buffer.Length
-            Crc.Append(buffer.AsSpan(offset, toCopy));
-            _buffer = null;
-            cntRead += toCopy;
-            count -= toCopy;
-            offset += toCopy;
-        }
+//         if (_position + count >= MaxLen)
+//         {
+//             count = (int)(MaxLen - _position);
+//         }
 
-        var actual = DiskStream.Read(buffer, offset, count);
-        Crc.Append(buffer.AsSpan(offset, count));
-        if (actual > count)
-        {
-            cntRead += count;
-            var diff = actual - count;
-            _buffer = new byte[diff];
-            Array.Copy(DiskStream.Remainder, 0, _buffer, 0, diff);
-            _position += count;
-            return cntRead;
-        }
-        cntRead += count;
+//         if (_buffer != null)
+//         {
+//             var toCopy = Math.Min(count, _buffer.Length);
+//             Array.Copy(_buffer, 0, buffer, offset, toCopy);
+//             _position += toCopy;
+//             if (count < _buffer.Length)
+//             {
+//                 _buffer = _buffer.AsSpan().Slice(toCopy).ToArray();
+//                 Crc.Append(buffer.AsSpan(offset, count));
+//                 return toCopy;
+//             }
+//             else if (count == _buffer.Length)
+//             {
+//                 _buffer = null;
+//                 Crc.Append(buffer.AsSpan(offset, count));
+//                 return toCopy;
+//             }
+//             // at this point, count > _buffer.Length
+//             Crc.Append(buffer.AsSpan(offset, toCopy));
+//             _buffer = null;
+//             cntRead += toCopy;
+//             count -= toCopy;
+//             offset += toCopy;
+//         }
 
-        _position += count;
-        return cntRead;
-    }
+//         var actual = DiskStream.Read(buffer, offset, count);
+//         Crc.Append(buffer.AsSpan(offset, count));
+//         if (actual > count)
+//         {
+//             cntRead += count;
+//             var diff = actual - count;
+//             _buffer = new byte[diff];
+//             Array.Copy(DiskStream.Remainder, 0, _buffer, 0, diff);
+//             _position += count;
+//             return cntRead;
+//         }
+//         cntRead += count;
 
-    public override long Seek(long offset, SeekOrigin origin)
-    {
-        _buffer = null;
-        _position = DiskStream.Seek(Offset + offset, origin);
-        return _position;
-    }
+//         _position += count;
+//         return cntRead;
+//     }
 
-    public override void SetLength(long value)
-    {
-        DiskStream.SetLength(value);
-    }
+//     public override long Seek(long offset, SeekOrigin origin)
+//     {
+//         _buffer = null;
+//         _position = DiskStream.Seek(Offset + offset, origin);
+//         return _position;
+//     }
 
-    public override void Write(byte[] buffer, int offset, int count)
-    {
-        DiskStream.Write(buffer, offset, count);
-    }
-}
+//     public override void SetLength(long value)
+//     {
+//         DiskStream.SetLength(value);
+//     }
+
+//     public override void Write(byte[] buffer, int offset, int count)
+//     {
+//         DiskStream.Write(buffer, offset, count);
+//     }
+// }
