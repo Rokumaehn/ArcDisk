@@ -79,6 +79,8 @@ public partial class MainWindow : Window
             ulong size = (ulong)sizeProperty.Value;
             var bytesPerSectorProperty = instance.CimInstanceProperties["BytesPerSector"];
             UInt32 bytesPerSector = (UInt32)bytesPerSectorProperty.Value;
+            var partitionsProperty = instance.CimInstanceProperties["Partitions"];
+            UInt32 partitions = (UInt32)partitionsProperty.Value;
 
             if(deviceId==null || size==0)
             {
@@ -91,7 +93,8 @@ public partial class MainWindow : Window
                 Model = model ?? "<N/A>",
                 DeviceId = deviceId,
                 Size = (long)size,
-                BytesPerSector = (int)bytesPerSector
+                BytesPerSector = (int)bytesPerSector,
+                Partitions = (int)partitions
             });
         }
 
@@ -189,7 +192,7 @@ public partial class MainWindow : Window
             CurrentSizeToRW = disk.Size;
             var physicalIndex = disk.PhysicalIndex;
 
-            var phys = new PhysicalDiskStream(physicalIndex, disk.BytesPerSector, disk.Size, FileAccess.Read);
+            var phys = new PhysicalDiskStream(physicalIndex, disk.BytesPerSector, disk.Size, FileAccess.Read, disk.Partitions);
             if(chkAllocd.IsChecked == true)
             {
                 CurrentSizeToRW = GetAllocatedSize(phys);
@@ -255,7 +258,7 @@ public partial class MainWindow : Window
             CurrentSizeToRW = disk.Size;
             var physicalIndex = disk.PhysicalIndex;
 
-            var phys = new PhysicalDiskStream(physicalIndex, disk.BytesPerSector, disk.Size, FileAccess.Read);
+            var phys = new PhysicalDiskStream(physicalIndex, disk.BytesPerSector, disk.Size, FileAccess.Read, disk.Partitions);
             if(chkAllocd.IsChecked == true)
             {
                 CurrentSizeToRW = GetAllocatedSize(phys);
@@ -321,7 +324,7 @@ public partial class MainWindow : Window
             CurrentSizeToRW = disk.Size;
             var physicalIndex = disk.PhysicalIndex;
 
-            var phys = new PhysicalDiskStream(physicalIndex, disk.BytesPerSector, disk.Size, FileAccess.Read);
+            var phys = new PhysicalDiskStream(physicalIndex, disk.BytesPerSector, disk.Size, FileAccess.Read, disk.Partitions);
             if(chkAllocd.IsChecked == true)
             {
                 CurrentSizeToRW = GetAllocatedSize(phys);
@@ -491,6 +494,8 @@ public partial class MainWindow : Window
         return max * 512;
     }
 
+    PhysicalDiskStream pds = null;
+
     private void btnQuery_Click(object sender, RoutedEventArgs e)
     {
         if(CurrentOperation != ImagingOperations.None)
@@ -509,47 +514,69 @@ public partial class MainWindow : Window
         btnWrite.IsEnabled = false;
         cmbFormat.IsEnabled = false;
 
-        var phys = new PhysicalDiskStream(disk.PhysicalIndex, disk.BytesPerSector, disk.Size, FileAccess.Read);
-        var file = new FileStream(@"C:\amiga\backups\Emu68-32GB-Kioxia.img", FileMode.Open, FileAccess.Read);
 
-        var c0 = 0;
-        var c1 = 0;
-        var buffer = new byte[1024 * 1024 * 64];
-        var comp = new byte[1024 * 1024 * 64];
-        c0 = phys.Read(buffer, 0, buffer.Length);
-        c1 = file.Read(comp, 0, comp.Length);
-        int iBlockOffset = 0;
-        while(c0 > 0 && c1 > 0)
-        {
-            if(c0 != c1)
-            {
-                Console.WriteLine("Length Mismatch.");
-                break;
-            }
 
-            for(int i=0; i < c0; i++)
-            {
-                if(buffer[i] != comp[i])
-                {
-                    Console.WriteLine("Mismatch Block {0} Offset in Block {1} Offset in File{2}.", iBlockOffset, i, iBlockOffset * 1024 * 1024 * 64 + i);
-                    break;
-                }
-            }
+        pds = new PhysicalDiskStream(disk.PhysicalIndex, disk.BytesPerSector, disk.Size, FileAccess.Write, disk.Partitions);
+        pds.DeletePartitionTable();
 
-            if(c0 < 1024 * 1024 * 64)
-            {
-                break;
-            }
 
-            c0 = phys.Read(buffer, 0, buffer.Length);
-            c1 = file.Read(comp, 0, comp.Length);
-            iBlockOffset++;
-        }
+        // var phys = new PhysicalDiskStream(disk.PhysicalIndex, disk.BytesPerSector, disk.Size, FileAccess.ReadWrite, disk.Partitions);
 
-        file.Close();
-        file.Dispose();
-        phys.Close();
-        phys.Dispose();
+        // var empty = new byte[512];
+        // for(int i=0; i < 512; i++)
+        // {
+        //     empty[i] = 0;
+        // }
+        // phys.Write(empty, 0, 512);
+        // phys.Flush();
+        // phys.Close();
+
+
+
+
+
+
+        //var phys = new PhysicalDiskStream(disk.PhysicalIndex, disk.BytesPerSector, disk.Size, FileAccess.Read, disk.Partitions);
+        //var file = new FileStream(@"C:\amiga\backups\Emu68-32GB-Kioxia.img", FileMode.Open, FileAccess.Read);
+        
+        // var c0 = 0;
+        // var c1 = 0;
+        // var buffer = new byte[1024 * 1024 * 64];
+        // var comp = new byte[1024 * 1024 * 64];
+        // c0 = phys.Read(buffer, 0, buffer.Length);
+        // c1 = file.Read(comp, 0, comp.Length);
+        // int iBlockOffset = 0;
+        // while(c0 > 0 && c1 > 0)
+        // {
+        //     if(c0 != c1)
+        //     {
+        //         Console.WriteLine("Length Mismatch.");
+        //         break;
+        //     }
+
+        //     for(int i=0; i < c0; i++)
+        //     {
+        //         if(buffer[i] != comp[i])
+        //         {
+        //             Console.WriteLine("Mismatch Block {0} Offset in Block {1} Offset in File{2}.", iBlockOffset, i, iBlockOffset * 1024 * 1024 * 64 + i);
+        //             break;
+        //         }
+        //     }
+
+        //     if(c0 < 1024 * 1024 * 64)
+        //     {
+        //         break;
+        //     }
+
+        //     c0 = phys.Read(buffer, 0, buffer.Length);
+        //     c1 = file.Read(comp, 0, comp.Length);
+        //     iBlockOffset++;
+        // }
+
+        // file.Close();
+        // file.Dispose();
+        // phys.Close();
+        // phys.Dispose();
 
         btnQuery.IsEnabled = true;
         btnRead.IsEnabled = true;
@@ -618,7 +645,7 @@ public partial class MainWindow : Window
         var path = filename;
         var physicalIndex = disk.PhysicalIndex;
 
-        var phys = new PhysicalDiskStream(physicalIndex, disk.BytesPerSector, disk.Size, FileAccess.Write);
+        var phys = new PhysicalDiskStream(physicalIndex, disk.BytesPerSector, disk.Size, FileAccess.Write, disk.Partitions);
 
         btnRead.IsEnabled = false;
         btnWrite.IsEnabled = false;
@@ -672,7 +699,7 @@ public partial class MainWindow : Window
         var path = filename;
         var physicalIndex = disk.PhysicalIndex;
 
-        var phys = new PhysicalDiskStream(physicalIndex, disk.BytesPerSector, disk.Size, FileAccess.Write);
+        var phys = new PhysicalDiskStream(physicalIndex, disk.BytesPerSector, disk.Size, FileAccess.Write, disk.Partitions);
 
         CurrentSizeToRW = disk.Size;
         btnRead.IsEnabled = false;
@@ -725,7 +752,10 @@ public partial class MainWindow : Window
         var path = filename;
         var physicalIndex = disk.PhysicalIndex;
 
-        var phys = new PhysicalDiskStream(physicalIndex, disk.BytesPerSector, disk.Size, FileAccess.Write);
+        var phys = new PhysicalDiskStream(physicalIndex, disk.BytesPerSector, disk.Size, FileAccess.Write, disk.Partitions);
+        // phys.DeletePartitionTable();
+        // phys.Close();
+        // phys = new PhysicalDiskStream(physicalIndex, disk.BytesPerSector, disk.Size, FileAccess.Write, 0);
 
         btnRead.IsEnabled = false;
         btnWrite.IsEnabled = false;

@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
@@ -21,30 +22,54 @@ public class PhysicalDiskStream : Stream
     public override long Position { get => _position; set => Seek(value, SeekOrigin.Begin); }
 
 
+    protected SafeFileHandle hDisk;
     protected FileStream DiskStream { get; set; }
 
     public int BlockSize {get; protected set;} = 512;
     public int ReadBufferSize  {get; protected set;} = 1024 * 1024 * 128;
     public int WriteBufferSize {get; protected set;} = 1024 * 1024 * 64;
 
+    protected SafeFileHandle[] PartitionHandles { get; set; }
 
-    public PhysicalDiskStream(int diskNumber, int bytesPerSector, long length, FileAccess access, int readBufferSize = 1024 * 1024 * 128, int writeBuffersSize = 0)
+    public bool IsDismounted { get; private set; } = false;
+    public bool IsLocked { get; private set; } = false;
+
+
+    public PhysicalDiskStream(int diskNumber, int bytesPerSector, long length, FileAccess access, int partitionCount, int readBufferSize = 1024 * 1024 * 128, int writeBuffersSize = 0)
     {
+        PartitionHandles = new SafeFileHandle[partitionCount];
+        for(int i = 0; i < partitionCount; i++)
+        {
+            PartitionHandles[i] = CreateDeviceHandle($@"\\.\GLOBALROOT\Device\Harddisk{diskNumber}\Partition{i+1}", FileAccess.ReadWrite, FileShare.ReadWrite);
+            bool test;
+            Debug.WriteLine($"Dismounting partition {i+1}.");
+            test = DismountPartition(PartitionHandles[i]);
+            if(test == false)
+            {
+                throw new IOException("Failed to dismount partition.");
+            }
+            // PartitionHandles[i].Close();
+        }
+
+        ReadBufferSize = readBufferSize;
+        WriteBufferSize = writeBuffersSize;
         BlockSize = bytesPerSector;
+        if(access == FileAccess.Write)
+        {
+            access = FileAccess.ReadWrite;
+        }
         _access = access;
         FileShare shr = _access switch
         {
             FileAccess.Read => FileShare.ReadWrite,
-            FileAccess.Write => FileShare.None,
-            FileAccess.ReadWrite => FileShare.None,
+            FileAccess.Write => FileShare.ReadWrite,
+            FileAccess.ReadWrite => FileShare.ReadWrite,
             _ => FileShare.None
         };
         _length = length;
         _work = new byte[BlockSize];
-        var hFile = CreateDeviceHandle($@"\\.\PhysicalDrive{diskNumber}", access, shr);
-        DiskStream = new FileStream(hFile, access);
-        //DiskStream = new FileStream($@"C:\amiga\backups\dryrun.img", FileMode.Create, access, shr);
-        //DiskStream = new FileStream($@"C:\amiga\backups\Emu68-32GB-Kioxia.img", FileMode.Open, FileAccess.Read, shr);
+        hDisk = CreateDeviceHandle($@"\\.\PhysicalDrive{diskNumber}", _access, shr);
+        DiskStream = new FileStream(hDisk, access);
         if(access == FileAccess.Read | access == FileAccess.ReadWrite)
         {
             asyncBuffer = new byte[ReadBufferSize];
@@ -59,6 +84,132 @@ public class PhysicalDiskStream : Stream
                 asyncWriteBuffer1 = new byte[WriteBufferSize];
             }
         }
+
+        Debug.WriteLine($"Dismounting drive.");
+        IsDismounted = DismountDrive();
+        if(IsDismounted == false)
+        {
+            throw new IOException("Failed to dismount drive.");
+        }
+
+        Debug.WriteLine($"Locking drive.");
+        IsLocked = LockDrive();
+        if(IsLocked == false)
+        {
+            throw new IOException("Failed to lock drive.");
+        }
+
+        // mbr = new byte[BlockSize];
+    }
+
+    //protected byte[] mbr;
+    //protected bool mbrWasWritten = false;
+
+    public void DeletePartitionTable()
+    {
+        // Delete Partition Table
+        var mbr = new byte[BlockSize];
+        DiskStream.Read(mbr, 0, BlockSize);
+        DiskStream.Seek(0, SeekOrigin.Begin);
+        for(int i=0; i < 64; i++)
+        {
+            mbr[0x1BE + i] = 0;
+        }
+        DiskStream.Write(mbr, 0, BlockSize);
+        DiskStream.Flush();
+        DiskStream.Seek(0, SeekOrigin.Begin);
+    }
+
+    override public void Close()
+    {
+        Flush();
+        // if(mbrWasWritten)
+        // {
+        //     DiskStream.Seek(0, SeekOrigin.Begin);
+        //     DiskStream.Write(mbr, 0, BlockSize);
+        //     DiskStream.Flush();
+        //     mbrWasWritten = false;
+        // }
+        if(IsLocked)
+        {
+            IsLocked = UnlockDrive() ? false : IsLocked;
+        }
+        if(hDisk != null)
+        {
+            hDisk.Close();
+            hDisk.Dispose();
+            hDisk = null;
+        }
+        DiskStream.Close();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if(disposing)
+        {
+            Flush();
+            DiskStream.Dispose();
+            if(IsLocked)
+            {
+                IsLocked = UnlockDrive() ? false : IsLocked;
+            }
+            if(hDisk != null)
+            {
+                hDisk.Close();
+                hDisk.Dispose();
+                hDisk = null;
+            }
+            for (int i = 0; i < PartitionHandles.Length; i++)
+            {
+                if (PartitionHandles[i] != null)
+                {
+                    PartitionHandles[i].Close();
+                    PartitionHandles[i].Dispose();
+                    PartitionHandles[i] = null;
+                }
+            }
+        }
+
+        base.Dispose(disposing);
+    }
+
+    protected bool DismountPartition(SafeFileHandle hPartition)
+    {
+        int bytesReturned;
+        var dio = DeviceIoControl(hPartition, CTL_CODE(0x00000009, 8, 0, 0), IntPtr.Zero, 0, IntPtr.Zero, 0, out bytesReturned, IntPtr.Zero);
+        return dio;
+    }
+    protected bool LockPartition(SafeFileHandle hPartition)
+    {
+        int bytesReturned;
+        var dio = DeviceIoControl(hPartition, CTL_CODE(0x00000009, 6, 0, 0), IntPtr.Zero, 0, IntPtr.Zero, 0, out bytesReturned, IntPtr.Zero);
+        return dio;
+    }
+    
+    protected bool UnlockPartition(SafeFileHandle hPartition)
+    {
+        int bytesReturned;
+        var dio = DeviceIoControl(hPartition, CTL_CODE(0x00000009, 7, 0, 0), IntPtr.Zero, 0, IntPtr.Zero, 0, out bytesReturned, IntPtr.Zero);
+        return dio;
+    }
+    protected bool DismountDrive()
+    {
+        int bytesReturned;
+        var dio = DeviceIoControl(hDisk, CTL_CODE(0x00000009, 8, 0, 0), IntPtr.Zero, 0, IntPtr.Zero, 0, out bytesReturned, IntPtr.Zero);
+        return dio;
+    }
+    protected bool LockDrive()
+    {
+        int bytesReturned;
+        var dio = DeviceIoControl(hDisk, CTL_CODE(0x00000009, 6, 0, 0), IntPtr.Zero, 0, IntPtr.Zero, 0, out bytesReturned, IntPtr.Zero);
+        return dio;
+    }
+    
+    protected bool UnlockDrive()
+    {
+        int bytesReturned;
+        var dio = DeviceIoControl(hDisk, CTL_CODE(0x00000009, 7, 0, 0), IntPtr.Zero, 0, IntPtr.Zero, 0, out bytesReturned, IntPtr.Zero);
+        return dio;
     }
 
     
@@ -292,6 +443,17 @@ public class PhysicalDiskStream : Stream
     protected bool needsFlush = false;
     protected void InternalWrite(byte[] buffer, int offset, int count)
     {
+        // if(_position==0)
+        // {
+        //     // defer MBR write.
+        //     Array.Copy(buffer, offset, mbr, 0, BlockSize);
+        //     _position += BlockSize;
+        //     offset += BlockSize;
+        //     count -= BlockSize;
+        //     DiskStream.Seek(BlockSize, SeekOrigin.Begin);
+        //     mbrWasWritten = true;
+        // }
+
         if(_position % BlockSize > 0)
         {
             var remain = (int)(BlockSize - _position % BlockSize);
@@ -364,6 +526,9 @@ public class PhysicalDiskStream : Stream
     }
 
 
+    [DllImport("kernel32.dll", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool CloseHandle(SafeFileHandle hObject);
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern SafeFileHandle CreateFile(
@@ -385,4 +550,17 @@ public class PhysicalDiskStream : Stream
 
         return handle;
     }
+
+    public static int CTL_CODE(int DeviceType, int Function, int Method, int Access)
+    {
+        return (((DeviceType) << 16) | ((Access) << 14) | ((Function) << 2) | (Method));
+    } 
+
+    [return: MarshalAs(UnmanagedType.Bool)]
+        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        public static extern bool DeviceIoControl([In] SafeFileHandle hDevice,
+            [In] int dwIoControlCode, [In] IntPtr lpInBuffer,
+            [In] int nInBufferSize, [Out] IntPtr lpOutBuffer,
+            [In] int nOutBufferSize, out int lpBytesReturned,
+            [In] IntPtr lpOverlapped);
 }
