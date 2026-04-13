@@ -3,6 +3,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Text;
 using System.Windows;
+using System.Windows.Media.Imaging;
 using Microsoft.Management.Infrastructure;
 using Microsoft.Win32;
 using SevenZip;
@@ -51,6 +52,19 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+
+        //IconTest = namespace; exclamic.ico = resource 
+        System.IO.Stream stream = this.GetType().Assembly.GetManifestResourceStream("ArcDisk.Resources.ArcDisk.ico");
+
+        if (stream != null)
+        {
+            //Decode the icon from the stream and set the first frame to the BitmapSource
+            BitmapDecoder decoder = IconBitmapDecoder.Create(stream, BitmapCreateOptions.None, BitmapCacheOption.None);
+            BitmapSource source = decoder.Frames[0];
+
+            //set the source of your image
+            this.Icon = source;
+        }
 
         Timer = new(ProgressTimerCallback, this, 0, 1000);
 
