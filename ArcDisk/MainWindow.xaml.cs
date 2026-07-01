@@ -133,6 +133,7 @@ public partial class MainWindow : Window
 
     public enum ImagingFormats
     {
+        Raw,
         Zip,
         Lzma,
         SevenZip
@@ -188,6 +189,62 @@ public partial class MainWindow : Window
         });
     }
 
+    protected void ReadRaw()
+    {
+        SaveFileDialog saveFileDialog = new SaveFileDialog();
+        saveFileDialog.Filter = "Raw Image (*.img)|*.img";
+        if (saveFileDialog.ShowDialog() == true)
+        {
+            var disk = lstDrives.SelectedItem as DiskListItem;
+            if (disk == null)
+            {
+                return;
+            }
+
+            var path = saveFileDialog.FileName;
+            var imgFileName = Path.GetFileNameWithoutExtension(path);
+            CurrentSizeToRW = disk.Size;
+            var physicalIndex = disk.PhysicalIndex;
+
+            var phys = new PhysicalDiskStream(physicalIndex, disk.BytesPerSector, disk.Size, FileAccess.Read, disk.Partitions);
+            if(chkAllocd.IsChecked == true)
+            {
+                CurrentSizeToRW = GetAllocatedSize(phys);
+            }
+            var st = new WrappedPhysicalDiskStream(phys, CurrentSizeToRW);
+
+            btnRead.IsEnabled = false;
+            btnWrite.IsEnabled = false;
+            lastBytesRW = 0;
+            
+            CurrentArchiveStream = new FileStream(path, FileMode.Create, FileAccess.Write);
+            IoTask = CopyBytesAsync(CurrentSizeToRW, st, CurrentArchiveStream);
+
+            CurrentOperation = ImagingOperations.Read;
+
+            IoTask.ContinueWith((t) =>
+            {
+                st.Close();
+                st.Dispose();
+                phys.Close();
+                phys.Dispose();
+
+                CurrentArchiveStream.Close();
+                CurrentArchiveStream.Dispose();
+                CurrentArchiveStream = null;
+
+                CurrentSizeToRW = 0;
+                CurrentOperation = ImagingOperations.None;
+                progIo.Dispatcher.Invoke(() =>
+                {
+                    btnRead.IsEnabled = true;
+                    btnWrite.IsEnabled = true;
+                    progIo.Value = 0;
+                });
+            });
+
+        }
+    }
 
     protected void ReadZip()
     {
@@ -441,6 +498,9 @@ public partial class MainWindow : Window
 
         switch (CurrentFormat)
         {
+            case ImagingFormats.Raw:
+                ReadRaw();
+                break;
             case ImagingFormats.Zip:
                 ReadZip();
                 break;
@@ -648,6 +708,50 @@ public partial class MainWindow : Window
         
     }
 
+    private void WriteRaw(string filename, string imgFileName)
+    {
+        var disk = lstDrives.SelectedItem as DiskListItem;
+        if (disk == null)
+        {
+            return;
+        }
+
+        var path = filename;
+        var physicalIndex = disk.PhysicalIndex;
+
+        var phys = new PhysicalDiskStream(physicalIndex, disk.BytesPerSector, disk.Size, FileAccess.Write, disk.Partitions);
+
+        btnRead.IsEnabled = false;
+        btnWrite.IsEnabled = false;
+        cmbFormat.IsEnabled = false;
+        lastBytesRW = 0;
+
+        CurrentArchiveStream = new FileStream(path, FileMode.Open, FileAccess.Read);
+        IoTask = CopyBytesAsync(CurrentSizeToRW, CurrentArchiveStream, phys);
+
+        CurrentOperation = ImagingOperations.Write;
+
+        IoTask.ContinueWith((t) =>
+        {
+            phys.Close();
+            phys.Dispose();
+
+            CurrentArchiveStream.Close();
+            CurrentArchiveStream.Dispose();
+            CurrentArchiveStream = null;
+
+            CurrentSizeToRW = 0;
+            CurrentOperation = ImagingOperations.None;
+            progIo.Dispatcher.Invoke(() =>
+            {
+                btnRead.IsEnabled = true;
+                btnWrite.IsEnabled = true;
+                cmbFormat.IsEnabled = true;
+                progIo.Value = 0;
+            });
+        });
+    }
+
     private void WriteZip(string filename, string imgFileName)
     {
         var disk = lstDrives.SelectedItem as DiskListItem;
@@ -823,7 +927,7 @@ public partial class MainWindow : Window
     private void btnWrite_Click(object sender, RoutedEventArgs e)
     {
         OpenFileDialog openFileDialog = new OpenFileDialog();
-        openFileDialog.Filter = "Image Disk Image(*.img.zip;*.img.lzma;*.img.7z)|*.img.zip;*.img.lzma;*.img.7z";
+        openFileDialog.Filter = "Disk Image(*.img;*.img.zip;*.img.lzma;*.img.7z)|*.img;*.img.zip;*.img.lzma;*.img.7z";
         if (openFileDialog.ShowDialog() == true)
         {
             var filename = openFileDialog.FileName;
@@ -832,6 +936,9 @@ public partial class MainWindow : Window
 
             switch (extension)
             {
+                case ".img":
+                    WriteRaw(filename, imgFileName);
+                    break;
                 case ".zip":
                     WriteZip(filename, imgFileName);
                     break;
